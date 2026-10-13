@@ -1,0 +1,216 @@
+const API_BASE = 'http://localhost:4000/api';
+
+async function getStoredToken() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['taskly_jwt_token'], (res) => {
+      resolve(res.taskly_jwt_token || null);
+    });
+  });
+}
+
+function formatMinutes(seconds) {
+  const mins = Math.round((seconds || 0) / 60);
+  if (mins >= 60) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  return `${mins}m`;
+}
+
+function getOriginPattern(domain, scope = 'entire_domain') {
+  if (domain === 'youtube.com' || domain === 'instagram.com') {
+    return `*://*.${domain}/*`;
+  }
+  return scope === 'hostname_only' ? `*://${domain}/*` : `*://*.${domain}/*`;
+}
+
+async function checkOriginPermission(domain, scope = 'entire_domain') {
+  return new Promise((resolve) => {
+    if (!chrome.permissions || !chrome.permissions.contains) {
+      resolve(true);
+      return;
+    }
+    if (domain === 'youtube.com' || domain === 'instagram.com') {
+      resolve(true);
+      return;
+    }
+    const origin = getOriginPattern(domain, scope);
+    chrome.permissions.contains({ origins: [origin] }, (result) => {
+      resolve(Boolean(result));
+    });
+  });
+}
+
+async function requestOriginPermission(domain, scope = 'entire_domain') {
+  return new Promise((resolve) => {
+    const origin = getOriginPattern(domain, scope);
+    chrome.permissions.request({ origins: [origin] }, (granted) => {
+      resolve(Boolean(granted));
+    });
+  });
+}
+
+async function loadRules() {
+  const container = document.getElementById('rules-container');
+  const token = await getStoredToken();
+
+  let rules = [];
+  try {
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const res = await fetch(`${API_BASE}/site-limits`, { headers });
+    if (res.ok) {
+      const data = await res.json();
+      rules = data.limits || [];
+    }
+  } catch (e) {
+    // Fallback to storage
+    const stored = await new Promise((r) =>
+      chrome.storage.local.get(['cached_rules'], (s) => r(s.cached_rules || []))
+    );
+    rules = stored;
+  }
+
+  if (rules.length === 0) {
+    container.innerHTML =
+      '<div style="font-size: 12px; color: #888; text-align: center; padding: 20px;">No website rules configured yet. Add them in Taskly!</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+
+  for (const rule of rules) {
+    const hasPerm = await checkOriginPermission(rule.domain, rule.scope);
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    let statusText = 'Allowed';
+    let statusClass = 'badge badge-ok';
+
+    if (rule.isBlocked) {
+      statusText = 'Blocked';
+      statusClass = 'badge badge-lock';
+    } else if (rule.isInBreak) {
+      statusText = `Break (${formatMinutes(rule.breakCountdownSeconds || 0)})`;
+      statusClass = 'badge badge-warn';
+    } else if (!rule.isEnabled) {
+      statusText = 'Paused';
+      statusClass = 'badge';
+    }
+
+    const usedFormatted = formatMinutes(rule.usedTodaySeconds);
+    const allowanceFormatted =
+      rule.dailyAllowanceSeconds > 0 ? formatMinutes(rule.dailyAllowanceSeconds) : 'Unlimited';
+
+    // Describe rule features
+    const details = [];
+    if (rule.scheduleWindowEnabled || rule.restrictionType === 'schedule') {
+      const policyLabel = rule.outsideWindowPolicy === 'block_outside' ? 'Allowed inside' : 'Restricted inside';
+      details.push(`🕒 ${rule.scheduleStartTime || '09:00'}–${rule.scheduleEndTime || '12:00'} (${policyLabel})`);
+    }
+    if (rule.dailyQuotaEnabled !== false && rule.dailyAllowanceSeconds > 0) {
+      details.push(`⏳ Quota: ${allowanceFormatted}`);
+    }
+    if (rule.cycleBreaksEnabled || rule.restrictionType === 'cycle') {
+      details.push(
+        `⏱️ Cycle: ${formatMinutes(rule.activeIntervalSeconds || 600)} use / ${formatMinutes(
+          rule.breakSeconds || 600
+        )} break`
+      );
+    }
+    if (details.length === 0) {
+      details.push(`Policy: ${rule.restrictionType || 'Standard'}`);
+    }
+
+    card.innerHTML = `
+      <div class="card-header">
+        <div class="site-title">
+          <span>${rule.displayName || rule.domain}</span>
+          <span style="font-size: 10px; font-weight: 500; color: #777;">(${rule.domain})</span>
+        </div>
+        <span class="${statusClass}">${statusText}</span>
+      </div>
+      <div style="font-size: 11px; color: #555; margin-bottom: 6px;">
+        ${details.join(' • ')}
+      </div>
+      <div class="stat-row">
+        <span>Usage Today:</span>
+        <span class="stat-val">${usedFormatted} / ${allowanceFormatted}</span>
+      </div>
+      <div class="stat-row">
+        <span>Permission:</span>
+        <span class="stat-val" style="color: ${hasPerm ? '#16A34A' : '#DC2626'};">
+          ${hasPerm ? '✓ Granted' : '⚠️ Action Required'}
+        </span>
+      </div>
+      ${
+        !hasPerm
+          ? `
+        <button class="perm-btn" data-domain="${rule.domain}" data-scope="${rule.scope || 'entire_domain'}">
+          Grant Browser Access for ${rule.domain}
+        </button>
+      `
+          : ''
+      }
+    `;
+
+    container.appendChild(card);
+  }
+
+  // Bind permission buttons
+  const permButtons = container.querySelectorAll('.perm-btn');
+  permButtons.forEach((btn) => {
+    btn.onclick = async () => {
+      const targetDomain = btn.getAttribute('data-domain');
+      const targetScope = btn.getAttribute('data-scope') || 'entire_domain';
+      const granted = await requestOriginPermission(targetDomain, targetScope);
+      if (granted) {
+        alert(`Access granted for ${targetDomain}! Taskly is now actively monitoring this website.`);
+        if (token) {
+          fetch(`${API_BASE}/site-limits/permission-status`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ domain: targetDomain, hasPermission: true }),
+          }).catch(() => {});
+        }
+        chrome.runtime.sendMessage({ type: 'REFRESH_RULES' });
+        loadRules();
+      } else {
+        alert(
+          `Permission was denied for ${targetDomain}.\n\nIf Chrome blocked the prompt, open chrome://extensions/, select Taskly details, and enable site access.`
+        );
+      }
+    };
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadRules();
+
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) {
+    refreshBtn.onclick = () => {
+      chrome.runtime.sendMessage({ type: 'REFRESH_RULES' }, () => {
+        loadRules();
+      });
+    };
+  }
+
+  const savePairBtn = document.getElementById('save-pair-btn');
+  if (savePairBtn) {
+    savePairBtn.onclick = () => {
+      const input = document.getElementById('pair-token-input');
+      const token = input.value.trim();
+      if (!token) return;
+
+      chrome.runtime.sendMessage({ type: 'PAIR_EXTENSION', token }, () => {
+        alert('Extension paired with Taskly account!');
+        input.value = '';
+        loadRules();
+      });
+    };
+  }
+});

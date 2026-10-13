@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Website Restricted — Taskly</title>
+  <style>
+    :root {
+      --bg: #F5F3ED;
+      --card-bg: #FFFFFF;
+      --border: #E2DDD3;
+      --text: #1E2022;
+      --text-muted: #6B7280;
+      --accent-danger: #E11D48;
+      --accent-warn: #D97706;
+      --accent-success: #10B981;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      background: #0F1117;
+      color: #F8FAFC;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      overflow-x: hidden;
+    }
+
+    .container {
+      background: #1C1E28;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 32px;
+      max-width: 540px;
+      width: 100%;
+      padding: 44px 36px;
+      text-align: center;
+      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6);
+      position: relative;
+    }
+
+    .icon-box {
+      width: 72px;
+      height: 72px;
+      border-radius: 24px;
+      margin: 0 auto 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 34px;
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+    }
+
+    .icon-break {
+      background: #10B981;
+      color: white;
+    }
+
+    .icon-blocked {
+      background: #E11D48;
+      color: white;
+    }
+
+    .icon-schedule {
+      background: #8B5CF6;
+      color: white;
+    }
+
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      color: #FFFFFF;
+      letter-spacing: -0.5px;
+      margin-bottom: 10px;
+    }
+
+    .domain-tag {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.08);
+      color: #94A3B8;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 4px 14px;
+      border-radius: 20px;
+      margin-bottom: 20px;
+      font-family: monospace;
+    }
+
+    .message {
+      font-size: 15px;
+      color: #94A3B8;
+      line-height: 1.6;
+      margin-bottom: 28px;
+    }
+
+    .countdown-card {
+      background: #262938;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 24px;
+      padding: 22px 28px;
+      margin-bottom: 28px;
+      display: inline-block;
+      min-width: 240px;
+    }
+
+    .countdown-label {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .countdown-timer {
+      font-size: 44px;
+      font-weight: 900;
+      color: #FFFFFF;
+      font-family: 'SF Mono', Consolas, Monaco, monospace;
+      letter-spacing: -1px;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 28px;
+      text-align: left;
+    }
+
+    .info-card {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 16px;
+      padding: 14px 16px;
+    }
+
+    .info-card-label {
+      font-size: 11px;
+      color: #64748B;
+      text-transform: uppercase;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+
+    .info-card-val {
+      font-size: 13px;
+      color: #F8FAFC;
+      font-weight: 600;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #94A3B8;
+      padding: 12px 20px;
+      border-radius: 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-secondary:hover {
+      border-color: rgba(255, 255, 255, 0.4);
+      color: #FFFFFF;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .btn-primary {
+      background: #FFFFFF;
+      border: none;
+      color: #0F1117;
+      padding: 12px 24px;
+      border-radius: 16px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary:hover {
+      background: #E2E8F0;
+      transform: translateY(-1px);
+    }
+
+    .taskly-brand {
+      margin-top: 24px;
+      font-size: 11px;
+      color: #64748B;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="icon-box" class="icon-box icon-blocked">🔒</div>
+    <h1 id="title">Website Access Restricted</h1>
+    <div id="domain-tag" class="domain-tag">youtube.com</div>
+
+    <p id="message" class="message">
+      Access to this site is locked according to your configured Taskly automation rule.
+    </p>
+
+    <div id="countdown-card" class="countdown-card" style="display: none;">
+      <span id="countdown-label" class="countdown-label" style="color: #10B981;">Remaining Break Time</span>
+      <div id="countdown-timer" class="countdown-timer">10:00</div>
+    </div>
+
+    <div class="info-grid">
+      <div class="info-card">
+        <div class="info-card-label">Restriction Policy</div>
+        <div id="policy-val" class="info-card-val">Daily Usage Cap</div>
+      </div>
+      <div class="info-card">
+        <div class="info-card-label">Next Eligible Access</div>
+        <div id="next-access-val" class="info-card-val">12:00 AM Midnight</div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button id="override-btn" class="btn-secondary">Emergency Override</button>
+      <button id="dashboard-btn" class="btn-primary">Open Taskly Dashboard</button>
+    </div>
+
+    <div class="taskly-brand">
+      <span>Enforced securely by Taskly Chrome Extension</span>
+    </div>
+  </div>
+
+  <script src="blocked.js"></script>
+</body>
+</html>
