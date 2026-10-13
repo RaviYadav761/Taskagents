@@ -1,36 +1,80 @@
-// Background Service Worker for Taskly Automation & Usage Controller (Phase 2)
-const API_BASE = 'http://localhost:4000/api';
-const AGENT_IPC_URL = 'http://127.0.0.1:47891';
+// Background Service Worker for Taskly Automation & Mindful Usage Controller (Manifest V3)
+import { matchDomain, parseAndNormalizeWebsite, resolveServiceProfile } from './urlHelper.js';
 
+let API_BASE = 'http://localhost:4000/api';
 let cachedRules = [];
 let authToken = null;
-let lastActiveTabId = null;
+let lastSyncTimestamp = null;
+let isInitialized = false;
 
 // Initialize on service worker start
-chrome.runtime.onInstalled.addListener(() => {
-  console.log('[Taskly Extension] Installed successfully.');
-  refreshRules();
+const initPromise = initServiceWorker();
+
+async function initServiceWorker() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(
+      ['cached_rules', 'taskly_jwt_token', 'taskly_api_base', 'last_sync_timestamp'],
+      async (res) => {
+        if (res.taskly_api_base) API_BASE = res.taskly_api_base;
+        if (res.taskly_jwt_token) authToken = res.taskly_jwt_token;
+        if (res.cached_rules && Array.isArray(res.cached_rules)) {
+          cachedRules = res.cached_rules;
+        }
+        if (res.last_sync_timestamp) lastSyncTimestamp = res.last_sync_timestamp;
+        isInitialized = true;
+
+        // Sync DNR rules based on persisted snapshot
+        try {
+          await syncDeclarativeNetRequestRules(cachedRules);
+        } catch (e) {
+          console.warn('[Taskly Extension] DNR init error:', e);
+        }
+
+        resolve(true);
+      }
+    );
+  });
+}
+
+// Ensure initialization is awaited by all events
+chrome.runtime.onInstalled.addListener(async () => {
+  await initPromise;
+  console.log('[Taskly Extension] Installed / Updated.');
+  await refreshRules();
 });
 
-// Periodic rule refresh every 60 seconds
+chrome.runtime.onStartup.addListener(async () => {
+  await initPromise;
+  await refreshRules();
+});
+
+// Periodic rule refresh and buffer flush every 60 seconds
 chrome.alarms.create('refresh_rules_alarm', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  await initPromise;
   if (alarm.name === 'refresh_rules_alarm') {
-    refreshRules();
-    flushBufferedEvents();
+    await refreshRules();
+    await flushBufferedEvents();
+    await checkAndEnforceSchedules();
   }
 });
 
 async function getStoredToken() {
+  await initPromise;
   return new Promise((resolve) => {
     chrome.storage.local.get(['taskly_jwt_token'], (res) => {
-      resolve(res.taskly_jwt_token || null);
+      resolve(res.taskly_jwt_token || authToken || null);
     });
   });
 }
 
+/**
+ * Fetch authoritative rules from Taskly backend and update storage & DNR
+ */
 async function refreshRules() {
+  await initPromise;
   authToken = await getStoredToken();
+
   try {
     const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
     const res = await fetch(`${API_BASE}/site-limits`, { headers });
@@ -38,42 +82,53 @@ async function refreshRules() {
       const data = await res.json();
       if (data.limits && Array.isArray(data.limits)) {
         cachedRules = data.limits;
-        chrome.storage.local.set({ cached_rules: cachedRules });
-        return;
+        lastSyncTimestamp = new Date().toISOString();
+        await new Promise((r) =>
+          chrome.storage.local.set(
+            { cached_rules: cachedRules, last_sync_timestamp: lastSyncTimestamp },
+            r
+          )
+        );
+        await syncDeclarativeNetRequestRules(cachedRules);
+        return cachedRules;
       }
     }
   } catch (err) {
-    // Backend offline: load from local storage
+    // Offline mode: continue enforcing from cached rules
   }
 
-  // Fallback to storage
-  chrome.storage.local.get(['cached_rules'], (res) => {
-    if (res.cached_rules) {
-      cachedRules = res.cached_rules;
-    }
+  // Fallback to locally persisted rules
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['cached_rules'], async (res) => {
+      if (res.cached_rules && Array.isArray(res.cached_rules)) {
+        cachedRules = res.cached_rules;
+        await syncDeclarativeNetRequestRules(cachedRules);
+      }
+      resolve(cachedRules);
+    });
   });
 }
 
+/**
+ * Find matching rule for a given hostname using boundary-safe matching
+ */
 function findRuleForHostname(hostname) {
-  if (!hostname) return null;
-  const cleanHost = hostname.toLowerCase().replace(/^www\./, '');
+  if (!hostname || !cachedRules || cachedRules.length === 0) return null;
+  const cleanHost = hostname.toLowerCase();
 
   for (const rule of cachedRules) {
     if (!rule.isEnabled) continue;
-    const ruleDomain = (rule.domain || '').toLowerCase().replace(/^www\./, '');
-
-    if (rule.scope === 'hostname_only') {
-      if (cleanHost === ruleDomain) return rule;
-    } else {
-      // Entire domain: matches domain or subdomains
-      if (cleanHost === ruleDomain || cleanHost.endsWith(`.${ruleDomain}`)) {
-        return rule;
-      }
+    const covered = rule.coveredDomains || (rule.covered_domains ? JSON.parse(rule.covered_domains) : null);
+    if (matchDomain(cleanHost, rule.domain, rule.scope || 'entire_domain', covered)) {
+      return rule;
     }
   }
   return null;
 }
 
+/**
+ * Evaluates the live restriction state of a rule against the current clock
+ */
 function evaluateRule(rule, now = new Date()) {
   const nowIso = now.toISOString();
   const tz = rule.timezone || 'Asia/Kolkata';
@@ -98,7 +153,7 @@ function evaluateRule(rule, now = new Date()) {
     };
   }
 
-  // Helper date in timezone
+  // Date and Time in timezone
   let todayStr = '';
   let currentTimeStr = '';
   let currentDay = 0;
@@ -167,7 +222,15 @@ function evaluateRule(rule, now = new Date()) {
         };
       }
     } else {
-      const inSchedule = currentTimeStr >= rule.scheduleStartTime && currentTimeStr <= rule.scheduleEndTime;
+      let inSchedule = false;
+      if (rule.scheduleStartTime <= rule.scheduleEndTime) {
+        // Normal daytime window e.g. 09:00 - 17:00
+        inSchedule = currentTimeStr >= rule.scheduleStartTime && currentTimeStr <= rule.scheduleEndTime;
+      } else {
+        // Overnight window e.g. 22:00 - 06:00
+        inSchedule = currentTimeStr >= rule.scheduleStartTime || currentTimeStr <= rule.scheduleEndTime;
+      }
+
       if (inSchedule) {
         if (policy === 'block_inside') {
           return {
@@ -184,7 +247,7 @@ function evaluateRule(rule, now = new Date()) {
             status: 'blocked',
             isBlocked: true,
             isInBreak: false,
-            reason: `Access allowed only during window (${rule.scheduleStartTime} - ${rule.scheduleEndTime} ${tz})`,
+            reason: `Access allowed only during scheduled window (${rule.scheduleStartTime} - ${rule.scheduleEndTime} ${tz})`,
             remainingAllowanceSeconds: 0,
           };
         }
@@ -242,10 +305,119 @@ function evaluateRule(rule, now = new Date()) {
   };
 }
 
-// Intercept navigation before page load: 100% un-bypassable
+/**
+ * Generate stable 32-bit positive integer ID for chrome.declarativeNetRequest rules
+ */
+function getNumericDnrId(ruleIdOrDomain, aliasIndex = 0) {
+  let hash = 0;
+  const str = `${ruleIdOrDomain}-${aliasIndex}`;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return (Math.abs(hash) % 1000000) + 100;
+}
+
+/**
+ * Synchronize chrome.declarativeNetRequest dynamic rules with current evaluated status
+ */
+async function syncDeclarativeNetRequestRules(rules) {
+  if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) {
+    return;
+  }
+
+  try {
+    const currentDynamicRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const existingRuleIds = currentDynamicRules.map((r) => r.id);
+
+    const rulesToAdd = [];
+    const now = new Date();
+
+    for (const rule of rules) {
+      if (!rule.isEnabled) continue;
+      const evalResult = evaluateRule(rule, now);
+
+      if (evalResult.isBlocked || evalResult.status === 'break') {
+        // Collect all covered domains
+        const profile = resolveServiceProfile(rule.domain);
+        const domains = profile ? [...profile.domains] : [rule.domain];
+        if (rule.coveredDomains && Array.isArray(rule.coveredDomains)) {
+          for (const cd of rule.coveredDomains) {
+            if (!domains.includes(cd)) domains.push(cd);
+          }
+        }
+
+        domains.forEach((dom, idx) => {
+          const ruleNumId = getNumericDnrId(rule.id || rule.domain, idx);
+          const cleanDom = dom.toLowerCase().replace(/^www\./, '');
+          const countdown = evalResult.breakCountdownSeconds || 0;
+          const status = evalResult.status;
+          const reason = evalResult.reason || '';
+
+          const redirectUrl = chrome.runtime.getURL(
+            `blocked.html?domain=${encodeURIComponent(cleanDom)}&status=${encodeURIComponent(status)}&countdown=${countdown}&reason=${encodeURIComponent(reason)}`
+          );
+
+          rulesToAdd.push({
+            id: ruleNumId,
+            priority: 1,
+            action: {
+              type: 'redirect',
+              redirect: {
+                url: redirectUrl,
+              },
+            },
+            condition: {
+              urlFilter: `||${cleanDom}`,
+              resourceTypes: ['main_frame'],
+            },
+          });
+        });
+      }
+    }
+
+    // Atomic update
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: existingRuleIds,
+      addRules: rulesToAdd,
+    });
+  } catch (err) {
+    console.warn('[Taskly Extension] DNR sync note:', err.message);
+  }
+}
+
+/**
+ * Notify all open matching tabs of a rule status transition
+ */
+async function broadcastRuleStateToTabs(domain, evalResult) {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.url && tab.url.startsWith('http')) {
+        try {
+          const parsed = new URL(tab.url);
+          const rule = findRuleForHostname(parsed.hostname);
+          if (rule && (rule.domain === domain || domain.includes(rule.domain))) {
+            chrome.tabs.sendMessage(tab.id, {
+              type: 'TASKLY_RULE_STATE_UPDATE',
+              status: evalResult.status,
+              reason: evalResult.reason,
+              countdown: evalResult.breakCountdownSeconds || 0,
+              domain: rule.domain,
+            }).catch(() => {});
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+}
+
+/**
+ * Secondary layer: Intercept top-level navigation via webNavigation
+ */
 if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
   chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
-    // Only inspect top-level navigation
+    await initPromise;
     if (details.frameId !== 0) return;
     if (!details.url || !details.url.startsWith('http')) return;
 
@@ -261,7 +433,7 @@ if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
             evalResult.reason || ''
           )}&countdown=${evalResult.breakCountdownSeconds || 0}&targetUrl=${encodeURIComponent(
             details.url
-          )}&policy=${encodeURIComponent(rule.restrictionType || '')}&status=${evalResult.status}`
+          )}&status=${evalResult.status}`
         );
         chrome.tabs.update(details.tabId, { url: blockUrl });
       }
@@ -269,13 +441,14 @@ if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
   });
 }
 
-// Track active tab and inject universal script if matching rule exists
+// Active tab injection & validation
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  lastActiveTabId = activeInfo.tabId;
+  await initPromise;
   checkAndInject(activeInfo.tabId);
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  await initPromise;
   if (changeInfo.status === 'complete' && tab.url) {
     checkAndInject(tabId, tab.url);
   }
@@ -294,7 +467,6 @@ async function checkAndInject(tabId, tabUrl) {
     const rule = findRuleForHostname(parsed.hostname);
     if (!rule) return;
 
-    // Fast check: If already blocked or in break, redirect to blocked.html
     const evalResult = evaluateRule(rule, new Date());
     if (evalResult.isBlocked || evalResult.status === 'break') {
       const blockUrl = chrome.runtime.getURL(
@@ -302,85 +474,108 @@ async function checkAndInject(tabId, tabUrl) {
           evalResult.reason || ''
         )}&countdown=${evalResult.breakCountdownSeconds || 0}&targetUrl=${encodeURIComponent(
           url
-        )}&policy=${encodeURIComponent(rule.restrictionType || '')}&status=${evalResult.status}`
+        )}&status=${evalResult.status}`
       );
       chrome.tabs.update(tabId, { url: blockUrl });
       return;
     }
 
-    // Check if domain is youtube or instagram (already covered by manifest content_scripts)
+    // If custom website not covered by static content_scripts, inject content_universal.js
     const host = parsed.hostname.toLowerCase();
-    if (host.includes('youtube.com') || host.includes('instagram.com')) return;
+    if (host.includes('youtube.com') || host.includes('youtu.be') || host.includes('instagram.com')) {
+      return;
+    }
 
-    // Inject universal content script for custom website
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['content_universal.js'],
     });
-  } catch (e) {
-    // Tab closed or restricted browser internal page
-  }
+  } catch (e) {}
 }
 
-// Message handler for active pings and actions
+/**
+ * Message handler for active tab pings, pairing, and emergency overrides
+ */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'ACTIVE_TAB_PING') {
-    handleActivePing(request, sender)
-      .then(sendResponse)
-      .catch(() => {
-        sendResponse(handleOfflineFallback(request));
+  (async () => {
+    await initPromise;
+
+    if (request.type === 'ACTIVE_TAB_PING') {
+      const result = await handleActivePing(request, sender);
+      sendResponse(result);
+      return;
+    }
+
+    if (request.type === 'YOUTUBE_ACTIVE_PING') {
+      const result = await handleActivePing(
+        {
+          domain: 'youtube.com',
+          deltaSeconds: request.deltaSeconds !== undefined ? request.deltaSeconds : 5,
+          eventId: `yt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        },
+        sender
+      );
+      sendResponse(result);
+      return;
+    }
+
+    if (request.type === 'CHECK_INSTAGRAM_LOCK') {
+      const rule = findRuleForHostname('instagram.com');
+      const evalRes = rule ? evaluateRule(rule, new Date()) : { isBlocked: false };
+      sendResponse({ isBlocked: evalRes.isBlocked });
+      return;
+    }
+
+    if (request.type === 'EMERGENCY_OVERRIDE') {
+      const result = await handleEmergencyOverride(request.domain);
+      sendResponse(result);
+      return;
+    }
+
+    if (request.type === 'PAIR_EXTENSION') {
+      const result = await handlePairExtension(request.token);
+      sendResponse(result);
+      return;
+    }
+
+    if (request.type === 'UNPAIR_EXTENSION') {
+      await chrome.storage.local.remove(['taskly_jwt_token', 'cached_rules']);
+      authToken = null;
+      cachedRules = [];
+      await syncDeclarativeNetRequestRules([]);
+      sendResponse({ success: true });
+      return;
+    }
+
+    if (request.type === 'REFRESH_RULES') {
+      const rules = await refreshRules();
+      sendResponse({ success: true, rules, lastSync: lastSyncTimestamp });
+      return;
+    }
+
+    if (request.type === 'GET_STATUS') {
+      sendResponse({
+        isInitialized,
+        isAuthenticated: Boolean(authToken),
+        rulesCount: cachedRules.length,
+        lastSync: lastSyncTimestamp,
       });
-    return true;
-  }
+      return;
+    }
+  })();
 
-  // Backwards compatibility for YouTube
-  if (request.type === 'YOUTUBE_ACTIVE_PING') {
-    handleActivePing(
-      {
-        domain: 'youtube.com',
-        deltaSeconds: request.deltaSeconds || 5,
-        eventId: `yt-${Date.now()}`,
-      },
-      sender
-    )
-      .then(sendResponse)
-      .catch(() => {
-        sendResponse(handleOfflineFallback({ domain: 'youtube.com', deltaSeconds: 5 }));
-      });
-    return true;
-  }
-
-  // Backwards compatibility for Instagram
-  if (request.type === 'CHECK_INSTAGRAM_LOCK') {
-    checkRuleStatus('instagram.com')
-      .then(sendResponse)
-      .catch(() => sendResponse({ isBlocked: false }));
-    return true;
-  }
-
-  if (request.type === 'EMERGENCY_OVERRIDE') {
-    handleEmergencyOverride(request.domain).then(sendResponse);
-    return true;
-  }
-
-  if (request.type === 'PAIR_EXTENSION') {
-    chrome.storage.local.set({ taskly_jwt_token: request.token }, () => {
-      authToken = request.token;
-      refreshRules().then(() => sendResponse({ success: true }));
-    });
-    return true;
-  }
-
-  if (request.type === 'REFRESH_RULES') {
-    refreshRules().then(() => sendResponse({ success: true, rules: cachedRules }));
-    return true;
-  }
+  return true; // Keep message channel open for async response
 });
 
 async function handleActivePing(req, sender) {
-  const domain = req.domain || 'youtube.com';
-  const deltaSeconds = req.deltaSeconds || 5;
+  const rawDomain = req.domain || 'youtube.com';
+  const deltaSeconds = req.deltaSeconds !== undefined && req.deltaSeconds !== null
+    ? Math.max(0, parseInt(req.deltaSeconds, 10))
+    : 5;
   const eventId = req.eventId || `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  const rule = findRuleForHostname(rawDomain);
+  const domain = rule ? rule.domain : rawDomain;
 
   authToken = authToken || (await getStoredToken());
   const headers = { 'Content-Type': 'application/json' };
@@ -400,34 +595,40 @@ async function handleActivePing(req, sender) {
 
     if (res.ok) {
       const data = await res.json();
-      // Update local cache
-      const rule = cachedRules.find((r) => r.domain === domain);
       if (rule) {
         rule.usedTodaySeconds = data.usedTodaySeconds;
         rule.inBreakUntil = data.inBreakUntil;
         rule.blockedUntil = data.blockedUntil;
+        chrome.storage.local.set({ cached_rules: cachedRules });
       }
 
-      // If state changed to break or blocked, redirect sender tab to blocked.html
-      if ((data.status === 'break' || data.status === 'blocked') && sender && sender.tab && sender.tab.id) {
-        const blockUrl = chrome.runtime.getURL(
-          `blocked.html?domain=${encodeURIComponent(domain)}&reason=${encodeURIComponent(
-            data.reason || ''
-          )}&countdown=${data.breakCountdownSeconds || 0}&targetUrl=${encodeURIComponent(
-            sender.tab.url || ''
-          )}&policy=${encodeURIComponent(rule?.restrictionType || '')}&status=${data.status}`
-        );
-        chrome.tabs.update(sender.tab.id, { url: blockUrl });
+      // If transition occurred, sync DNR and broadcast to tabs
+      if (data.status === 'break' || data.status === 'blocked') {
+        await syncDeclarativeNetRequestRules(cachedRules);
+        await broadcastRuleStateToTabs(domain, data);
+
+        if (sender && sender.tab && sender.tab.id) {
+          const blockUrl = chrome.runtime.getURL(
+            `blocked.html?domain=${encodeURIComponent(domain)}&reason=${encodeURIComponent(
+              data.reason || ''
+            )}&countdown=${data.breakCountdownSeconds || 0}&targetUrl=${encodeURIComponent(
+              sender.tab.url || ''
+            )}&status=${data.status}`
+          );
+          chrome.tabs.update(sender.tab.id, { url: blockUrl });
+        }
       }
 
       return data;
     }
   } catch (netErr) {
-    // Network failed -> buffer event and return offline calculation
+    // Network offline -> buffer event
   }
 
-  // Buffer event offline
-  bufferEvent({ eventId, domain, deltaSeconds, timestamp: new Date().toISOString() });
+  // Offline buffer and local computation
+  if (deltaSeconds > 0) {
+    bufferEvent({ eventId, domain, deltaSeconds, timestamp: new Date().toISOString() });
+  }
   return handleOfflineFallback({ domain, deltaSeconds });
 }
 
@@ -460,9 +661,7 @@ async function flushBufferedEvents() {
       if (resp.ok) {
         chrome.storage.local.set({ buffered_events: [] });
       }
-    } catch (e) {
-      // Still offline
-    }
+    } catch (e) {}
   });
 }
 
@@ -479,11 +678,13 @@ function handleOfflineFallback({ domain, deltaSeconds = 5 }) {
     return evalBefore;
   }
 
-  // Accumulate locally
-  rule.usedTodaySeconds = (rule.usedTodaySeconds || 0) + deltaSeconds;
-  let status = 'allowed';
+  if (deltaSeconds > 0) {
+    rule.usedTodaySeconds = (rule.usedTodaySeconds || 0) + deltaSeconds;
+  }
 
-  if (rule.cycleBreaksEnabled || rule.restrictionType === 'cycle') {
+  let status = 'allowed';
+  const shouldCheckCycle = Boolean(rule.cycleBreaksEnabled || rule.restrictionType === 'cycle');
+  if (shouldCheckCycle) {
     const interval = rule.activeIntervalSeconds || 600;
     const breakDuration = rule.breakSeconds || 600;
 
@@ -497,21 +698,18 @@ function handleOfflineFallback({ domain, deltaSeconds = 5 }) {
     status = 'blocked';
   }
 
+  chrome.storage.local.set({ cached_rules: cachedRules });
+  syncDeclarativeNetRequestRules(cachedRules);
+
   return {
     status,
-    domain,
+    domain: rule.domain,
     usedTodaySeconds: rule.usedTodaySeconds,
     remainingAllowanceSeconds: Math.max(0, (rule.dailyAllowanceSeconds || 0) - rule.usedTodaySeconds),
     inBreakUntil: rule.inBreakUntil,
     breakCountdownSeconds: rule.inBreakUntil ? Math.max(0, Math.round((new Date(rule.inBreakUntil) - now) / 1000)) : 0,
+    reason: status === 'break' ? 'Mindful break in progress' : status === 'blocked' ? 'Daily quota reached' : 'Access allowed',
   };
-}
-
-async function checkRuleStatus(domain) {
-  const rule = findRuleForHostname(domain);
-  if (!rule) return { isBlocked: false };
-  const evalResult = evaluateRule(rule, new Date());
-  return { isBlocked: evalResult.isBlocked, blockedUntil: rule.blockedUntil };
 }
 
 async function handleEmergencyOverride(domain) {
@@ -531,6 +729,42 @@ async function handleEmergencyOverride(domain) {
     rule.emergencyOverride = true;
     rule.inBreakUntil = null;
     rule.blockedUntil = null;
+    chrome.storage.local.set({ cached_rules: cachedRules });
+    await syncDeclarativeNetRequestRules(cachedRules);
+    await broadcastRuleStateToTabs(domain, { status: 'allowed' });
   }
   return { success: true };
+}
+
+async function handlePairExtension(tokenOrCode) {
+  if (!tokenOrCode) return { success: false, error: 'Token or code required' };
+
+  let token = tokenOrCode.trim();
+
+  // If user pasted a short pairing code (e.g. 6-8 alphanumeric chars like EXT-XXXXXX or TSK-XXXX), exchange it!
+  if (token.length <= 16 && !token.includes('.')) {
+    try {
+      const res = await fetch(`${API_BASE}/auth/extension-exchange`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairingCode: token }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Invalid or expired pairing code' };
+      }
+      token = data.token;
+    } catch (e) {
+      return { success: false, error: 'Failed to connect to Taskly authentication server' };
+    }
+  }
+
+  authToken = token;
+  await new Promise((r) => chrome.storage.local.set({ taskly_jwt_token: token }, r));
+  const rules = await refreshRules();
+  return { success: true, rulesCount: rules.length };
+}
+
+async function checkAndEnforceSchedules() {
+  await syncDeclarativeNetRequestRules(cachedRules);
 }

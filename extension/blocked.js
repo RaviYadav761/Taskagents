@@ -97,12 +97,14 @@
   // Dashboard button
   if (dashboardBtn) {
     dashboardBtn.onclick = () => {
-      const dashboardUrl = 'http://localhost:5173/';
-      if (chrome.tabs && chrome.tabs.create) {
-        chrome.tabs.create({ url: dashboardUrl });
-      } else {
-        window.location.href = dashboardUrl;
-      }
+      chrome.storage.local.get(['taskly_web_url'], (res) => {
+        const dashboardUrl = res.taskly_web_url || 'http://localhost:5173/';
+        if (chrome.tabs && chrome.tabs.create) {
+          chrome.tabs.create({ url: dashboardUrl });
+        } else {
+          window.location.href = dashboardUrl;
+        }
+      });
     };
   }
 })();

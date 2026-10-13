@@ -1,7 +1,7 @@
 import express from 'express';
 import db from '../db.js';
 import { authenticateUser } from '../auth.js';
-import { parseAndNormalizeWebsite } from '../urlHelper.js';
+import { parseAndNormalizeWebsite, matchDomain } from '../urlHelper.js';
 
 const router = express.Router();
 router.use(authenticateUser);
@@ -313,6 +313,7 @@ router.get('/', (req, res) => {
       id: row.id,
       jobId: row.job_id,
       domain: row.domain,
+      coveredDomains: row.covered_domains ? (typeof row.covered_domains === 'string' ? JSON.parse(row.covered_domains) : row.covered_domains) : [row.domain],
       url: row.url || `https://${row.domain}`,
       displayName: row.display_name || row.domain,
       scope: row.scope || 'entire_domain',
@@ -392,15 +393,17 @@ router.post('/rule', (req, res) => {
     blockedUntil = getMidnightDate(timezone);
   }
 
+  const coveredDomainsJson = JSON.stringify(parsed.coveredDomains || [parsed.normalizedDomain]);
+
   const stmt = db.prepare(`
     INSERT INTO site_limits (
-      id, user_id, job_id, domain, url, display_name, scope, restriction_type,
+      id, user_id, job_id, domain, url, display_name, scope, covered_domains, restriction_type,
       schedule_window_enabled, schedule_start_time, schedule_end_time, outside_window_policy,
       daily_quota_enabled, daily_allowance_seconds, cycle_breaks_enabled, active_interval_seconds, break_seconds,
       active_days, start_date, end_date, timezone,
       blocked_until, last_reset_date, is_enabled, emergency_override, created_at, updated_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
@@ -411,6 +414,7 @@ router.post('/rule', (req, res) => {
       url = excluded.url,
       display_name = excluded.display_name,
       scope = excluded.scope,
+      covered_domains = excluded.covered_domains,
       restriction_type = excluded.restriction_type,
       schedule_window_enabled = excluded.schedule_window_enabled,
       schedule_start_time = excluded.schedule_start_time,
@@ -438,6 +442,7 @@ router.post('/rule', (req, res) => {
     parsed.originalUrl,
     finalDisplayName,
     parsed.scope,
+    coveredDomainsJson,
     restrictionType,
     scheduleWindowEnabled ? 1 : (restrictionType === 'schedule' ? 1 : 0),
     scheduleStartTime,
@@ -512,7 +517,9 @@ router.post('/sync-usage', (req, res) => {
 
   for (const ev of events) {
     const domain = ev.domain || 'youtube.com';
-    const deltaSeconds = parseInt(ev.deltaSeconds || 5, 10);
+    const deltaSeconds = ev.deltaSeconds !== undefined && ev.deltaSeconds !== null
+      ? Math.max(0, parseInt(ev.deltaSeconds, 10))
+      : 5;
     const eventId = ev.eventId || `evt-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const timestamp = ev.timestamp || nowIso;
     const deviceId = ev.deviceId || null;
@@ -529,9 +536,20 @@ router.post('/sync-usage', (req, res) => {
       continue;
     }
 
-    // 2. Fetch the corresponding rule
-    const getStmt = db.prepare('SELECT * FROM site_limits WHERE user_id = ? AND domain = ?');
-    const row = getStmt.get(req.user.id, domain);
+    // 2. Fetch the corresponding rule using domain and alias matching
+    let row = null;
+    const allUserRules = db.prepare('SELECT * FROM site_limits WHERE user_id = ?').all(req.user.id);
+    for (const r of allUserRules) {
+      const covered = r.covered_domains ? (typeof r.covered_domains === 'string' ? JSON.parse(r.covered_domains) : r.covered_domains) : null;
+      if (matchDomain(domain, r.domain, r.scope || 'entire_domain', covered)) {
+        row = r;
+        break;
+      }
+    }
+
+    if (!row) {
+      row = db.prepare('SELECT * FROM site_limits WHERE user_id = ? AND domain = ?').get(req.user.id, domain);
+    }
 
     if (!row) continue;
 

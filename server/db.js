@@ -187,6 +187,7 @@ try {
     { name: 'blocked_seconds_today', def: 'INTEGER DEFAULT 0' },
     { name: 'has_extension_permission', def: 'INTEGER DEFAULT 0' },
     { name: 'last_synced_at', def: 'TEXT' },
+    { name: 'covered_domains', def: "TEXT DEFAULT '[]'" },
     { name: 'created_at', def: "TEXT DEFAULT ''" },
   ];
 
@@ -195,6 +196,7 @@ try {
       db.exec(`ALTER TABLE site_limits ADD COLUMN ${col.name} ${col.def};`);
     }
   }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_site_limits_job ON site_limits(job_id);');
 } catch (migErr) {
   console.warn('Migration note for site_limits:', migErr.message);
 }

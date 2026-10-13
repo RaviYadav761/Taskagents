@@ -45,6 +45,27 @@ export const api = {
     return await res.json();
   },
 
+  async generateExtensionPairingCode() {
+    const res = await fetch(`${API_BASE}/auth/extension-code`, {
+      method: 'POST',
+      headers: { ...getAuthHeader() },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to generate extension code');
+    return data;
+  },
+
+  async exchangeExtensionPairingCode(pairingCode) {
+    const res = await fetch(`${API_BASE}/auth/extension-exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pairingCode }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to exchange pairing code');
+    return data;
+  },
+
   // Jobs / Automations
   async getJobs() {
     const res = await fetch(`${API_BASE}/jobs`, {

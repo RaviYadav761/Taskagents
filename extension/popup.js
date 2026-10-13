@@ -1,4 +1,10 @@
-const API_BASE = 'http://localhost:4000/api';
+async function getApiBase() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['taskly_api_url'], (res) => {
+      resolve(res.taskly_api_url || 'http://localhost:4000/api');
+    });
+  });
+}
 
 async function getStoredToken() {
   return new Promise((resolve) => {
@@ -54,11 +60,12 @@ async function requestOriginPermission(domain, scope = 'entire_domain') {
 async function loadRules() {
   const container = document.getElementById('rules-container');
   const token = await getStoredToken();
+  const apiBase = await getApiBase();
 
   let rules = [];
   try {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const res = await fetch(`${API_BASE}/site-limits`, { headers });
+    const res = await fetch(`${apiBase}/site-limits`, { headers });
     if (res.ok) {
       const data = await res.json();
       rules = data.limits || [];
@@ -167,7 +174,7 @@ async function loadRules() {
       if (granted) {
         alert(`Access granted for ${targetDomain}! Taskly is now actively monitoring this website.`);
         if (token) {
-          fetch(`${API_BASE}/site-limits/permission-status`, {
+          fetch(`${apiBase}/site-limits/permission-status`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -187,7 +194,29 @@ async function loadRules() {
   });
 }
 
+async function updateAccountStatus() {
+  const token = await getStoredToken();
+  const statusEl = document.getElementById('account-status');
+  if (statusEl) {
+    if (token) {
+      statusEl.innerHTML = `<span style="color: #16A34A;">● Connected to Taskly Account</span> <button id="unlink-btn" style="background: none; border: none; color: #DC2626; font-size: 10px; cursor: pointer; text-decoration: underline; margin-left: 6px;">Unlink</button>`;
+      const unlinkBtn = document.getElementById('unlink-btn');
+      if (unlinkBtn) {
+        unlinkBtn.onclick = () => {
+          chrome.storage.local.remove(['taskly_jwt_token', 'cached_rules'], () => {
+            updateAccountStatus();
+            loadRules();
+          });
+        };
+      }
+    } else {
+      statusEl.innerHTML = `<span style="color: #D97706;">○ Not Paired (Enter code from Taskly)</span>`;
+    }
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  updateAccountStatus();
   loadRules();
 
   const refreshBtn = document.getElementById('refresh-btn');
@@ -195,6 +224,7 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshBtn.onclick = () => {
       chrome.runtime.sendMessage({ type: 'REFRESH_RULES' }, () => {
         loadRules();
+        updateAccountStatus();
       });
     };
   }
@@ -206,10 +236,20 @@ document.addEventListener('DOMContentLoaded', () => {
       const token = input.value.trim();
       if (!token) return;
 
-      chrome.runtime.sendMessage({ type: 'PAIR_EXTENSION', token }, () => {
-        alert('Extension paired with Taskly account!');
-        input.value = '';
-        loadRules();
+      savePairBtn.disabled = true;
+      savePairBtn.textContent = 'Linking...';
+
+      chrome.runtime.sendMessage({ type: 'PAIR_EXTENSION', token }, (response) => {
+        savePairBtn.disabled = false;
+        savePairBtn.textContent = 'Link';
+        if (response && response.success) {
+          alert('Extension paired successfully with your Taskly account!');
+          input.value = '';
+          updateAccountStatus();
+          loadRules();
+        } else {
+          alert(`Failed to pair: ${response?.error || 'Invalid code or connection error'}`);
+        }
       });
     };
   }

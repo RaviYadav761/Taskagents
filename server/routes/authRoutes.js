@@ -4,6 +4,9 @@ import { hashPassword, comparePassword, generateToken, authenticateUser } from '
 
 const router = express.Router();
 
+// Active extension pairing codes cache: code -> { userId, expiresAt }
+export const activeExtensionPairingCodes = new Map();
+
 // Register new user
 router.post('/register', (req, res) => {
   const { email, password, fullName } = req.body;
@@ -41,7 +44,7 @@ router.post('/register', (req, res) => {
       VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1, 0, ?)
     `);
     insertSiteLimit.run(`limit-yt-${userId}`, userId, 'youtube.com', 10800, 600, 600, today, now);
-    insertSiteLimit.run(`limit-ig-${userId}`, userId, 'instagram.com', 0, 0, 0, 0, today, 0, 0, now);
+    insertSiteLimit.run(`limit-ig-${userId}`, userId, 'instagram.com', 0, 0, 0, today, 0, 0, now);
 
     const user = { id: userId, email: cleanEmail, fullName: cleanName, role: 'Personal Workspace' };
     const token = generateToken(user);
@@ -94,6 +97,54 @@ router.get('/me', authenticateUser, (req, res) => {
     return res.status(404).json({ error: 'User not found' });
   }
   return res.json({ user });
+});
+
+// Generate short-lived Extension Pairing Code
+router.post('/extension-code', authenticateUser, (req, res) => {
+  const code = `EXT-${Math.floor(1000 + Math.random() * 9000)}`;
+  const expiresAt = Date.now() + 15 * 60 * 1000; // 15 mins
+
+  activeExtensionPairingCodes.set(code, {
+    userId: req.user.id,
+    expiresAt,
+  });
+
+  res.json({
+    pairingCode: code,
+    expiresInMinutes: 15,
+  });
+});
+
+// Exchange short-lived Extension Pairing Code for JWT
+router.post('/extension-exchange', (req, res) => {
+  const { pairingCode } = req.body;
+  if (!pairingCode) {
+    return res.status(400).json({ error: 'Pairing code is required' });
+  }
+
+  const cleanCode = pairingCode.trim().toUpperCase();
+  const entry = activeExtensionPairingCodes.get(cleanCode);
+
+  if (!entry) {
+    return res.status(401).json({ error: 'Invalid or expired pairing code' });
+  }
+
+  if (Date.now() > entry.expiresAt) {
+    activeExtensionPairingCodes.delete(cleanCode);
+    return res.status(401).json({ error: 'Pairing code has expired. Please generate a new code in Taskly.' });
+  }
+
+  // Consume code (one-time use)
+  activeExtensionPairingCodes.delete(cleanCode);
+
+  const stmt = db.prepare('SELECT id, email, full_name, role, avatar FROM users WHERE id = ?');
+  const user = stmt.get(entry.userId);
+  if (!user) {
+    return res.status(404).json({ error: 'User account not found' });
+  }
+
+  const token = generateToken(user);
+  return res.json({ token, user });
 });
 
 export default router;

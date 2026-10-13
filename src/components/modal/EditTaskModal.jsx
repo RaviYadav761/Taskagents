@@ -17,11 +17,13 @@ import {
   Mail,
   Bell,
   ShieldAlert,
-  ChevronDown
+  ChevronDown,
+  Loader2
 } from "lucide-react";
 import { CATEGORIES, PRIORITIES } from "../../data/initialTasks";
 import { describeCron, validateCron, calculateNextRunPreview, CRON_PRESETS, TIMEZONES } from "../../utils/cronUtils";
 import { parseAndNormalizeWebsite } from "../../utils/urlHelper";
+import { WebsiteIdentityBadge } from "../common/BrandIcons";
 import { api } from "../../utils/api";
 
 const ACTION_TYPES = [
@@ -88,6 +90,8 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
   const [notesHeader, setNotesHeader] = useState("");
   const [bulletPoints, setBulletPoints] = useState([]);
   const [image, setImage] = useState("/assets/dumbbell.jpg");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
 
   // Load task into state when opened
   useEffect(() => {
@@ -163,10 +167,11 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
     setBulletPoints((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setSubmitError(null);
     if (!title.trim()) {
-      alert("Please enter a task title.");
+      setSubmitError("Please enter a task title.");
       return;
     }
 
@@ -175,7 +180,7 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
     if (actionType === "restrict_website") {
       normalizedWebsite = parseAndNormalizeWebsite(websiteUrl, websiteScope);
       if (!normalizedWebsite.valid) {
-        alert(`Website Validation Error: ${normalizedWebsite.error}`);
+        setSubmitError(`Website Validation Error: ${normalizedWebsite.error}`);
         return;
       }
     }
@@ -196,6 +201,7 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
       domain: normalizedWebsite ? normalizedWebsite.normalizedDomain : restrictionDomain,
       websiteUrl: normalizedWebsite ? normalizedWebsite.originalUrl : websiteUrl.trim(),
       displayName: normalizedWebsite ? normalizedWebsite.displayName : "",
+      coveredDomains: normalizedWebsite ? normalizedWebsite.coveredDomains : [],
       scope: websiteScope,
       restrictionType,
       scheduleWindowEnabled,
@@ -239,58 +245,43 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
       updatedAt: new Date().toISOString(),
     };
 
-    onUpdateTask(updatedTask);
-
-    api.updateJob(updatedTask.id, {
-      title: updatedTask.title,
-      category: updatedTask.category,
-      priority: updatedTask.priority,
-      actionType,
-      actionPayload,
-      scheduleType: updatedTask.scheduleType,
-      cronExpression: updatedTask.cronExpression,
-      timezone,
-      startDate: updatedTask.dueDate,
-      startTime: time ? time.split("–")[0].trim() : "18:00",
-      status: updatedTask.status,
-      missedPolicy,
-      repeat: updatedTask.repeat,
-      goal: updatedTask.goal,
-      notesHeader: updatedTask.notesHeader,
-      bulletPoints: updatedTask.bulletPoints,
-      image: updatedTask.image,
-    }).catch((err) => {
-      console.warn("Backend sync notice:", err.message);
-    });
-
-    if (actionType === "restrict_website" && normalizedWebsite) {
-      api.saveSiteLimitRule({
-        url: normalizedWebsite.originalUrl,
-        scope: normalizedWebsite.scope,
-        restrictionType,
-        displayName: normalizedWebsite.displayName,
-        scheduleWindowEnabled,
-        scheduleStartTime: websiteScheduleStart,
-        scheduleEndTime: websiteScheduleEnd,
-        outsideWindowPolicy,
-        dailyQuotaEnabled,
-        dailyAllowanceSeconds: Number(websiteDailyMaxMinutes) * 60,
-        cycleBreaksEnabled,
-        activeIntervalSeconds: Number(websiteActiveMinutes) * 60,
-        breakSeconds: Number(websiteBreakMinutes) * 60,
-        activeDays: websiteActiveDays,
-        startDate: dateRangeEnabled ? (websiteStartDate || null) : null,
-        endDate: dateRangeEnabled ? (websiteEndDate || null) : null,
+    setIsSubmitting(true);
+    try {
+      // Authoritative transactional backend update:
+      // updates the job AND the linked site_limit atomically in one SQLite transaction
+      await api.updateJob(updatedTask.id, {
+        title: updatedTask.title,
+        category: updatedTask.category,
+        priority: updatedTask.priority,
+        actionType,
+        actionPayload,
+        scheduleType: updatedTask.scheduleType,
+        cronExpression: updatedTask.cronExpression,
         timezone,
-        isEnabled: true,
-      }).catch((err) => {
-        console.warn("Notice: Site limit rule buffered offline:", err.message);
+        startDate: updatedTask.dueDate,
+        startTime: time ? time.split("–")[0].trim() : "18:00",
+        status: updatedTask.status,
+        missedPolicy,
+        repeat: updatedTask.repeat,
+        goal: updatedTask.goal,
+        notesHeader: updatedTask.notesHeader,
+        bulletPoints: updatedTask.bulletPoints,
+        image: updatedTask.image,
       });
-    }
 
-    onClose();
+      if (onUpdateTask) {
+        onUpdateTask(updatedTask);
+      }
+      setIsSubmitting(false);
+      onClose();
+    } catch (err) {
+      console.error("Failed to update task:", err);
+      setIsSubmitting(false);
+      setSubmitError(err.message || "Failed to save task update. Please check server connection.");
+    }
   };
 
+  const websitePreview = actionType === "restrict_website" ? parseAndNormalizeWebsite(websiteUrl, websiteScope) : null;
   const cronValidation = repeat === "Custom Cron Expression" ? validateCron(cronExpr) : { valid: true };
   const humanCronDesc = repeat === "Custom Cron Expression" ? describeCron(cronExpr) : "";
   const nextRunPreview = repeat === "Custom Cron Expression" ? calculateNextRunPreview(cronExpr, timezone) : null;
@@ -319,6 +310,11 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
 
         {/* Scrollable Form Body */}
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto no-scrollbar py-4 space-y-4 text-xs">
+          {submitError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
+              ⚠️ {submitError}
+            </div>
+          )}
           {/* Action Type */}
           <div>
             <label className="block text-xs font-bold text-neutral-800 mb-1 flex items-center gap-1.5">
@@ -419,6 +415,20 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
                   placeholder="https://www.youtube.com/"
                   className="w-full bg-white text-xs font-semibold rounded-xl px-3 py-2 border border-neutral-200 outline-none"
                 />
+                {websitePreview && websitePreview.valid && (
+                  <div className="mt-2">
+                    <WebsiteIdentityBadge
+                      url={websitePreview.originalUrl}
+                      domain={websitePreview.normalizedDomain}
+                      displayName={websitePreview.displayName}
+                      coveredDomains={websitePreview.coveredDomains}
+                      scope={websiteScope}
+                    />
+                  </div>
+                )}
+                {websitePreview && !websitePreview.valid && websiteUrl.trim() && (
+                  <p className="text-[11px] text-rose-500 mt-1 font-medium">⚠️ {websitePreview.error}</p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -763,9 +773,19 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
           <div className="pt-2 border-t border-neutral-150">
             <button
               type="submit"
-              className="w-full py-3 bg-neutral-900 hover:bg-black text-white font-bold rounded-xl text-xs transition-colors cursor-pointer"
+              disabled={isSubmitting}
+              className={`w-full py-3 bg-neutral-900 hover:bg-black text-white font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 ${
+                isSubmitting ? "opacity-60 cursor-not-allowed" : "cursor-pointer"
+              }`}
             >
-              Save Changes
+              {isSubmitting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  <span>Saving Changes...</span>
+                </>
+              ) : (
+                <span>Save Changes</span>
+              )}
             </button>
           </div>
         </form>

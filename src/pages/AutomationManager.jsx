@@ -25,7 +25,7 @@ import {
   BarChart2,
   Calendar
 } from "lucide-react";
-import { YoutubeIcon, InstagramIcon } from "../components/common/BrandIcons";
+import { WebsiteIcon, YoutubeIcon, InstagramIcon } from "../components/common/BrandIcons";
 import { api } from "../utils/api";
 
 const AutomationManager = ({
@@ -40,6 +40,9 @@ const AutomationManager = ({
   const [devices, setDevices] = useState([]);
   const [pairingModalOpen, setPairingModalOpen] = useState(false);
   const [pairingCode, setPairingCode] = useState(null);
+  const [extensionPairingModalOpen, setExtensionPairingModalOpen] = useState(false);
+  const [extensionPairingCode, setExtensionPairingCode] = useState(null);
+  const [extensionPairingLoading, setExtensionPairingLoading] = useState(false);
   const [selectedExecutionLog, setSelectedExecutionLog] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("all"); // 'all' | 'rules' | 'analytics' | 'history'
@@ -125,6 +128,19 @@ const AutomationManager = ({
       setPairingModalOpen(true);
     } catch (e) {
       alert("Please sign in or start the Taskly backend to pair devices.");
+    }
+  };
+
+  const handleGenerateExtensionCode = async () => {
+    try {
+      setExtensionPairingLoading(true);
+      const data = await api.generateExtensionPairingCode();
+      setExtensionPairingCode(data.code);
+      setExtensionPairingModalOpen(true);
+    } catch (e) {
+      alert("Please sign in to generate a Chrome extension pairing code.");
+    } finally {
+      setExtensionPairingLoading(false);
     }
   };
 
@@ -348,13 +364,24 @@ const AutomationManager = ({
               <h2 className="text-sm font-black text-neutral-900">Configured Website Usage Rules</h2>
               <p className="text-xs text-neutral-500">Rules are automatically synchronized and enforced by the Taskly Extension.</p>
             </div>
-            <button
-              onClick={onOpenCreateModal}
-              className="px-3 py-1.5 bg-neutral-900 hover:bg-black text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
-            >
-              <Plus size={14} />
-              <span>Add Custom Website Rule</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleGenerateExtensionCode}
+                disabled={extensionPairingLoading}
+                className="px-3 py-1.5 bg-white border border-[#E2DDD3] hover:border-neutral-400 text-neutral-800 text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-2xs transition-colors"
+              >
+                <ShieldAlert size={14} className="text-amber-600" />
+                <span>Connect Chrome Extension</span>
+              </button>
+              <button
+                onClick={onOpenCreateModal}
+                className="px-3 py-1.5 bg-neutral-900 hover:bg-black text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <Plus size={14} />
+                <span>Add Website Rule</span>
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -362,8 +389,6 @@ const AutomationManager = ({
               const used = rule.usedTodaySeconds || 0;
               const cap = rule.dailyAllowanceSeconds || 0;
               const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
-              const isYt = rule.domain.includes("youtube");
-              const isIg = rule.domain.includes("instagram");
 
               return (
                 <div
@@ -373,10 +398,8 @@ const AutomationManager = ({
                   <div>
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2.5">
-                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white ${
-                          isYt ? "bg-red-600" : isIg ? "bg-gradient-to-tr from-amber-500 via-rose-500 to-purple-600" : "bg-neutral-900"
-                        }`}>
-                          {isYt ? <YoutubeIcon size={18} /> : isIg ? <InstagramIcon size={18} /> : <Globe size={18} />}
+                        <div className="w-10 h-10 rounded-xl bg-white border border-neutral-200 flex items-center justify-center shrink-0 shadow-2xs">
+                          <WebsiteIcon domain={rule.domain} size={22} />
                         </div>
                         <div>
                           <h3 className="font-bold text-sm text-neutral-900 flex items-center gap-1.5">
@@ -877,6 +900,60 @@ const AutomationManager = ({
               className="w-full py-2.5 bg-neutral-900 hover:bg-black text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
             >
               Done & Check Status
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Chrome Extension Pairing Modal */}
+      {extensionPairingModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-[28px] w-full max-w-md p-6 sm:p-7 shadow-2xl border border-neutral-200">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center border border-amber-200">
+                  <ShieldAlert size={18} />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-neutral-900">Link Chrome Extension</h3>
+                  <p className="text-[11px] text-neutral-500">One-time secure authentication token</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExtensionPairingModalOpen(false)}
+                className="w-8 h-8 rounded-full hover:bg-neutral-100 flex items-center justify-center text-neutral-500 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="text-center py-4 bg-[#FAF8F5] rounded-2xl border border-[#E2DDD3] mb-4">
+              <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Extension Pairing Code</span>
+              <span className="text-3xl font-black text-neutral-900 tracking-widest font-mono mt-1 block select-all">
+                {extensionPairingCode || "EXT-0000"}
+              </span>
+              <span className="text-[10px] text-neutral-400 mt-1 block">Valid for 15 minutes • Single-use exchange</span>
+            </div>
+
+            <div className="space-y-2 text-xs text-neutral-600 mb-5">
+              <p className="font-semibold text-neutral-800">Quick Connection Steps:</p>
+              <ol className="list-decimal list-inside space-y-1 text-neutral-600 text-[11px]">
+                <li>Click the <strong>Taskly</strong> icon in your Chrome extensions bar.</li>
+                <li>In the popup under <strong>Account Link</strong>, paste this code.</li>
+                <li>Click <strong>Link</strong> to authorize the extension to receive rules and track quota.</li>
+              </ol>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setExtensionPairingModalOpen(false);
+                loadData();
+              }}
+              className="w-full py-2.5 bg-neutral-900 hover:bg-black text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+            >
+              Done & Refresh Rules
             </button>
           </div>
         </div>

@@ -23,6 +23,7 @@ import {
 import { describeCron, validateCron, calculateNextRunPreview, CRON_PRESETS, TIMEZONES } from "../../utils/cronUtils";
 import { parseAndNormalizeWebsite } from "../../utils/urlHelper";
 import { api } from "../../utils/api";
+import { WebsiteIcon, WebsiteIdentityBadge } from "../common/BrandIcons";
 
 const PRESET_IMAGES = [
   {
@@ -155,6 +156,8 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
     "10 min cool down",
   ]);
   const [notesText, setNotesText] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
 
   // Element refs for triggering pickers
   const fileInputRef = useRef(null);
@@ -299,7 +302,7 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     const name = taskName.trim() || (actionType !== "standard" ? "Automated Task" : "New Task");
 
@@ -362,7 +365,7 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
     if (actionType === "restrict_website") {
       normalizedWebsite = parseAndNormalizeWebsite(websiteUrl, websiteScope);
       if (!normalizedWebsite.valid) {
-        alert(`Website Validation Error: ${normalizedWebsite.error}`);
+        setSubmitError(`Website Validation Error: ${normalizedWebsite.error}`);
         return;
       }
     }
@@ -402,91 +405,45 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
       endDate: dateRangeEnabled ? websiteEndDate : null,
     };
 
-    const taskId = `task-${Date.now()}`;
-    const newTask = {
-      id: taskId,
-      pillTitle: name.length > 15 ? name.substring(0, 14) + "..." : name,
-      title: name,
-      priority: actionType !== "standard" ? "High Priority" : "Medium Priority",
-      category,
-      status: "Pending",
-      date: dateDisplay || "Today",
-      dueDate: selectedDate || todayISO,
-      time: timeString,
-      repeat: repeat || "Daily",
-      goal: goal.trim() || (actionType !== "standard" ? `Execute ${actionType}` : "Stay fit and healthy"),
-      notesMode,
-      notesHeader: finalHeader,
-      bulletPoints: finalBulletPoints,
-      notes: finalNotes,
-      image: selectedImage || "/assets/laptop.jpg",
-      actionType,
-      actionPayload,
-      scheduleType,
-      cronExpression: finalCron,
-      timezone,
-      missedPolicy,
-      createdAt: new Date().toISOString(),
-    };
+    setIsSubmitting(true);
+    setSubmitError(null);
 
-    // 1. Add to React UI state
-    onAddTask(newTask);
-
-    // 2. Persist to backend database asynchronously
-    api.createJob({
-      title: newTask.title,
-      category: newTask.category,
-      priority: newTask.priority,
-      actionType,
-      actionPayload,
-      scheduleType,
-      cronExpression: finalCron,
-      timezone,
-      startDate: newTask.dueDate,
-      startTime: startTime || "18:00",
-      missedPolicy,
-      repeat: newTask.repeat,
-      goal: newTask.goal,
-      notes: newTask.notes,
-      notesHeader: newTask.notesHeader,
-      bulletPoints: newTask.bulletPoints,
-      image: newTask.image,
-    }).catch((err) => {
-      console.warn("Backend sync notice (offline mode active):", err.message);
-    });
-
-    // 3. If website restriction, also save directly into site_limits
-    if (actionType === "restrict_website" && normalizedWebsite) {
-      api.saveSiteLimitRule({
-        url: normalizedWebsite.originalUrl,
-        scope: normalizedWebsite.scope,
-        restrictionType,
-        displayName: normalizedWebsite.displayName,
-        scheduleWindowEnabled,
-        scheduleStartTime: websiteScheduleStart,
-        scheduleEndTime: websiteScheduleEnd,
-        outsideWindowPolicy,
-        dailyQuotaEnabled,
-        dailyAllowanceSeconds: Number(websiteDailyMaxMinutes) * 60,
-        cycleBreaksEnabled,
-        activeIntervalSeconds: Number(websiteActiveMinutes) * 60,
-        breakSeconds: Number(websiteBreakMinutes) * 60,
-        activeDays: websiteActiveDays,
-        startDate: dateRangeEnabled ? (websiteStartDate || null) : null,
-        endDate: dateRangeEnabled ? (websiteEndDate || null) : null,
+    try {
+      const res = await api.createJob({
+        title: name,
+        category,
+        priority: actionType !== "standard" ? "High Priority" : "Medium Priority",
+        actionType,
+        actionPayload,
+        scheduleType,
+        cronExpression: finalCron,
         timezone,
-        isEnabled: true,
-      }).catch((err) => {
-        console.warn("Notice: Site limit rule buffered offline:", err.message);
+        startDate: selectedDate || todayISO,
+        startTime: startTime || "18:00",
+        missedPolicy,
+        repeat: repeat || "Daily",
+        goal: goal.trim() || (actionType !== "standard" ? `Execute ${actionType}` : "Stay fit and healthy"),
+        notes: finalNotes,
+        notesHeader: finalHeader,
+        bulletPoints: finalBulletPoints,
+        image: selectedImage || "/assets/laptop.jpg",
       });
+
+      if (res?.job) {
+        onAddTask(res.job);
+      }
+      onClose();
+
+      // Reset form on success
+      setTaskName("");
+      setGoal("");
+      setActionType("standard");
+    } catch (err) {
+      console.error("Task creation failed:", err);
+      setSubmitError(err.message || "Failed to save and sync automation task. Please check server connection.");
+    } finally {
+      setIsSubmitting(false);
     }
-
-    onClose();
-
-    // Reset form
-    setTaskName("");
-    setGoal("");
-    setActionType("standard");
   };
 
   const cronValidation = repeat === "Custom Cron Expression" ? validateCron(cronExpr) : { valid: true };
@@ -670,14 +627,13 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
                     required
                   />
                 </div>
-                {/* Real-time URL validation badge */}
+                {/* Real-time URL validation badge & website identity preview */}
                 {(() => {
                   const check = parseAndNormalizeWebsite(websiteUrl, websiteScope);
                   if (check.valid) {
                     return (
-                      <div className="mt-1.5 flex items-center justify-between text-[11px] bg-emerald-50 text-emerald-800 border border-emerald-200/60 rounded-lg px-2.5 py-1">
-                        <span className="font-semibold">✓ Valid: {check.displayName}</span>
-                        <span className="font-mono text-[10px] text-emerald-700">Canonical: {check.normalizedDomain}</span>
+                      <div className="mt-2 space-y-1.5 animate-in fade-in">
+                        <WebsiteIdentityBadge domain={check.normalizedDomain} scope={websiteScope} />
                       </div>
                     );
                   }
@@ -1445,14 +1401,35 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
             )}
           </div>
 
+          {/* Error Banner */}
+          {submitError && (
+            <div className="mb-3 p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center justify-between shadow-2xs animate-in fade-in">
+              <span className="flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{submitError}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSubmitError(null)}
+                className="text-rose-600 hover:text-rose-800 font-bold ml-2 text-sm cursor-pointer"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
           {/* Submit */}
           <div className="pt-2">
             <button
               type="submit"
-              disabled={repeat === "Custom Cron Expression" && !cronValidation.valid}
-              className="w-full py-3.5 bg-black hover:bg-neutral-800 disabled:bg-neutral-300 text-white font-bold rounded-2xl transition-all shadow-md text-sm cursor-pointer"
+              disabled={isSubmitting || (repeat === "Custom Cron Expression" && !cronValidation.valid)}
+              className="w-full py-3.5 bg-black hover:bg-neutral-800 disabled:bg-neutral-400 text-white font-bold rounded-2xl transition-all shadow-md text-sm cursor-pointer"
             >
-              {actionType !== "standard" ? "Save & Activate Automation" : "Create Task"}
+              {isSubmitting
+                ? "Saving & Syncing..."
+                : actionType !== "standard"
+                ? "Save & Activate Automation"
+                : "Create Task"}
             </button>
           </div>
         </form>

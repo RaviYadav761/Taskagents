@@ -482,6 +482,10 @@ const Homepage = () => {
     if (selectedTaskId === taskId && updated.length > 0) {
       setSelectedTaskId(updated[0].id);
     }
+    // Notify backend to atomically delete job and linked site limits
+    api.deleteJob(taskId).catch((err) => {
+      console.warn("Notice: Task delete buffered offline:", err.message);
+    });
   };
 
   const handleUpdateTask = (updatedTask) => {
@@ -511,6 +515,11 @@ const Homepage = () => {
     if (selectedTaskId === taskId && remainingPending.length > 0) {
       setSelectedTaskId(remainingPending[0].id);
     }
+
+    // Notify backend to toggle job and synchronously update linked site limits
+    api.toggleJobStatus(taskId).catch((err) => {
+      console.warn("Notice: Task toggle buffered offline:", err.message);
+    });
   };
 
   // Compute counts for dashboard tabs

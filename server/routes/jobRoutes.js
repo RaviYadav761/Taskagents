@@ -4,34 +4,58 @@ import { authenticateUser } from '../auth.js';
 import { validateCronExpression, getNextRunDate, describeCronExpression } from '../cronHelper.js';
 import { parseAndNormalizeWebsite } from '../urlHelper.js';
 
-function upsertSiteLimitFromJob(jobId, userId, payload = {}, timezone = 'Asia/Kolkata') {
+export function upsertSiteLimitFromJob(jobId, userId, payload = {}, timezone = 'Asia/Kolkata') {
   const rawUrl = payload.websiteUrl || payload.url || (payload.domain ? `https://${payload.domain}` : null);
-  if (!rawUrl) return;
+  if (!rawUrl) {
+    throw new Error('A valid website URL or domain is required for website restriction');
+  }
 
   const parsed = parseAndNormalizeWebsite(rawUrl, payload.scope || 'entire_domain');
-  if (!parsed.valid) return;
+  if (!parsed.valid) {
+    throw new Error(`Website validation error: ${parsed.error}`);
+  }
 
   const ruleId = `rule-${parsed.normalizedDomain}-${userId}`;
   const now = new Date().toISOString();
   const today = new Date().toISOString().split('T')[0];
 
+  const coveredDomainsJson = JSON.stringify(parsed.coveredDomains || [parsed.normalizedDomain]);
+  const isQuotaEnabled = payload.dailyQuotaEnabled !== false;
+  const allowance = isQuotaEnabled
+    ? parseInt(payload.dailyAllowanceSeconds ?? (payload.dailyMaxMinutes ? payload.dailyMaxMinutes * 60 : 10800), 10)
+    : 0;
+
+  const isCycleEnabled = Boolean(payload.cycleBreaksEnabled || payload.restrictionType === 'cycle');
+  const activeInterval = parseInt(payload.activeIntervalSeconds ?? (payload.activeIntervalMinutes ? payload.activeIntervalMinutes * 60 : 600), 10);
+  const breakDuration = parseInt(payload.breakSeconds ?? (payload.breakMinutes ? payload.breakMinutes * 60 : 600), 10);
+  const isScheduleEnabled = Boolean(payload.scheduleWindowEnabled || payload.restrictionType === 'schedule');
+
+  let blockedUntil = null;
+  if (payload.restrictionType === 'today_only') {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    blockedUntil = tomorrow.toISOString();
+  }
+
   const stmt = db.prepare(`
     INSERT INTO site_limits (
-      id, user_id, job_id, domain, url, display_name, scope, restriction_type,
+      id, user_id, job_id, domain, url, display_name, scope, covered_domains, restriction_type,
       schedule_window_enabled, schedule_start_time, schedule_end_time, outside_window_policy,
       daily_quota_enabled, daily_allowance_seconds, cycle_breaks_enabled, active_interval_seconds, break_seconds,
-      active_days, start_date, end_date, timezone, last_reset_date, is_enabled, emergency_override, created_at, updated_at
+      active_days, start_date, end_date, timezone, blocked_until, last_reset_date, is_enabled, emergency_override, created_at, updated_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, 1, 0, ?, ?
+      ?, ?, ?, ?, ?, ?, 1, 0, ?, ?
     )
     ON CONFLICT(user_id, domain) DO UPDATE SET
       job_id = excluded.job_id,
       url = excluded.url,
       display_name = excluded.display_name,
       scope = excluded.scope,
+      covered_domains = excluded.covered_domains,
       restriction_type = excluded.restriction_type,
       schedule_window_enabled = excluded.schedule_window_enabled,
       schedule_start_time = excluded.schedule_start_time,
@@ -46,7 +70,9 @@ function upsertSiteLimitFromJob(jobId, userId, payload = {}, timezone = 'Asia/Ko
       start_date = excluded.start_date,
       end_date = excluded.end_date,
       timezone = excluded.timezone,
-      is_enabled = excluded.is_enabled,
+      blocked_until = COALESCE(excluded.blocked_until, site_limits.blocked_until),
+      is_enabled = 1,
+      emergency_override = 0,
       updated_at = excluded.updated_at
   `);
 
@@ -58,24 +84,28 @@ function upsertSiteLimitFromJob(jobId, userId, payload = {}, timezone = 'Asia/Ko
     parsed.originalUrl,
     payload.displayName || parsed.displayName,
     parsed.scope,
+    coveredDomainsJson,
     payload.restrictionType || 'cycle',
-    payload.scheduleWindowEnabled ? 1 : (payload.restrictionType === 'schedule' ? 1 : 0),
+    isScheduleEnabled ? 1 : 0,
     payload.scheduleStartTime || '09:00',
     payload.scheduleEndTime || '12:00',
     payload.outsideWindowPolicy || 'block_outside',
-    payload.dailyQuotaEnabled !== false ? 1 : 0,
-    parseInt(payload.dailyAllowanceSeconds || (payload.dailyMaxMinutes ? payload.dailyMaxMinutes * 60 : 10800), 10),
-    payload.cycleBreaksEnabled ? 1 : (payload.restrictionType === 'cycle' ? 1 : 0),
-    parseInt(payload.activeIntervalSeconds || (payload.activeIntervalMinutes ? payload.activeIntervalMinutes * 60 : 600), 10),
-    parseInt(payload.breakSeconds || (payload.breakMinutes ? payload.breakMinutes * 60 : 600), 10),
+    isQuotaEnabled ? 1 : 0,
+    allowance,
+    isCycleEnabled ? 1 : 0,
+    activeInterval,
+    breakDuration,
     JSON.stringify(payload.activeDays || [0, 1, 2, 3, 4, 5, 6]),
     payload.startDate || null,
     payload.endDate || null,
     timezone,
+    blockedUntil,
     today,
     now,
     now
   );
+
+  return db.prepare('SELECT * FROM site_limits WHERE id = ?').get(ruleId);
 }
 
 const router = express.Router();
@@ -140,7 +170,7 @@ router.get('/:id', (req, res) => {
   res.json({ job: formatJob(row) });
 });
 
-// POST create new job
+// POST create new job (Authoritative transactional operation)
 router.post('/', (req, res) => {
   const {
     title,
@@ -166,6 +196,18 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'Job title is required' });
   }
 
+  // Pre-validate website restriction if selected
+  if (actionType === 'restrict_website') {
+    const rawUrl = actionPayload.websiteUrl || actionPayload.url || (actionPayload.domain ? `https://${actionPayload.domain}` : null);
+    if (!rawUrl) {
+      return res.status(400).json({ error: 'Website URL or domain is required for website restriction' });
+    }
+    const check = parseAndNormalizeWebsite(rawUrl, actionPayload.scope || 'entire_domain');
+    if (!check.valid) {
+      return res.status(400).json({ error: `Website validation error: ${check.error}` });
+    }
+  }
+
   // If custom cron is provided, validate it
   if (scheduleType === 'cron' || cronExpression) {
     const cronValidation = validateCronExpression(cronExpression);
@@ -186,21 +228,23 @@ router.post('/', (req, res) => {
   const id = `job-${Date.now()}`;
   const now = new Date().toISOString();
 
-  const insertStmt = db.prepare(`
-    INSERT INTO jobs (
-      id, user_id, title, category, priority, action_type, action_payload,
-      schedule_type, cron_expression, timezone, start_date, start_time,
-      next_run_at, status, missed_policy, repeat, goal, notes, notes_header,
-      bullet_points, image, created_at, updated_at
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, 'Scheduled', ?, ?, ?, ?, ?,
-      ?, ?, ?, ?
-    )
-  `);
-
+  // Execute in transaction
+  db.exec('BEGIN TRANSACTION;');
   try {
+    const insertStmt = db.prepare(`
+      INSERT INTO jobs (
+        id, user_id, title, category, priority, action_type, action_payload,
+        schedule_type, cron_expression, timezone, start_date, start_time,
+        next_run_at, status, missed_policy, repeat, goal, notes, notes_header,
+        bullet_points, image, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, 'Scheduled', ?, ?, ?, ?, ?,
+        ?, ?, ?, ?
+      )
+    `);
+
     insertStmt.run(
       id,
       req.user.id,
@@ -226,7 +270,7 @@ router.post('/', (req, res) => {
       now
     );
 
-    // If scheduled, create initial execution slot
+    // Initial execution slot
     if (nextRunAt) {
       const execStmt = db.prepare(`
         INSERT INTO executions (
@@ -236,25 +280,30 @@ router.post('/', (req, res) => {
       execStmt.run(`exec-${Date.now()}`, id, req.user.id, actionType, nextRunAt, now);
     }
 
-    // Synchronize website restriction to site_limits atomically
+    // Atomic website restriction upsert
+    let linkedSiteLimit = null;
     if (actionType === 'restrict_website') {
-      try {
-        upsertSiteLimitFromJob(id, req.user.id, actionPayload, timezone);
-      } catch (siteErr) {
-        console.warn('Notice: site limit sync during job creation:', siteErr.message);
-      }
+      linkedSiteLimit = upsertSiteLimitFromJob(id, req.user.id, actionPayload, timezone);
     }
+
+    db.exec('COMMIT;');
 
     const createdStmt = db.prepare('SELECT * FROM jobs WHERE id = ?');
     const createdRow = createdStmt.get(id);
-    return res.status(201).json({ job: formatJob(createdRow) });
+
+    return res.status(201).json({
+      success: true,
+      job: formatJob(createdRow),
+      siteLimit: linkedSiteLimit,
+    });
   } catch (err) {
+    db.exec('ROLLBACK;');
     console.error('Failed to create job:', err);
-    return res.status(500).json({ error: 'Failed to create job' });
+    return res.status(500).json({ error: err.message || 'Failed to create job' });
   }
 });
 
-// PUT update job
+// PUT update job (Authoritative transactional operation)
 router.put('/:id', (req, res) => {
   const existingStmt = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?');
   const existing = existingStmt.get(req.params.id, req.user.id);
@@ -283,6 +332,18 @@ router.put('/:id', (req, res) => {
     image,
   } = req.body;
 
+  if (actionType === 'restrict_website') {
+    const payloadToCheck = actionPayload || JSON.parse(existing.action_payload || '{}');
+    const rawUrl = payloadToCheck.websiteUrl || payloadToCheck.url || (payloadToCheck.domain ? `https://${payloadToCheck.domain}` : null);
+    if (!rawUrl) {
+      return res.status(400).json({ error: 'Website URL or domain is required for website restriction' });
+    }
+    const check = parseAndNormalizeWebsite(rawUrl, payloadToCheck.scope || 'entire_domain');
+    if (!check.valid) {
+      return res.status(400).json({ error: `Website validation error: ${check.error}` });
+    }
+  }
+
   if (cronExpression) {
     const cronValidation = validateCronExpression(cronExpression);
     if (!cronValidation.valid) {
@@ -300,32 +361,33 @@ router.put('/:id', (req, res) => {
 
   const now = new Date().toISOString();
 
-  const updateStmt = db.prepare(`
-    UPDATE jobs SET
-      title = COALESCE(?, title),
-      category = COALESCE(?, category),
-      priority = COALESCE(?, priority),
-      action_type = COALESCE(?, action_type),
-      action_payload = COALESCE(?, action_payload),
-      schedule_type = COALESCE(?, schedule_type),
-      cron_expression = ?,
-      timezone = COALESCE(?, timezone),
-      start_date = COALESCE(?, start_date),
-      start_time = COALESCE(?, start_time),
-      next_run_at = ?,
-      status = COALESCE(?, status),
-      missed_policy = COALESCE(?, missed_policy),
-      repeat = COALESCE(?, repeat),
-      goal = COALESCE(?, goal),
-      notes = COALESCE(?, notes),
-      notes_header = COALESCE(?, notes_header),
-      bullet_points = COALESCE(?, bullet_points),
-      image = COALESCE(?, image),
-      updated_at = ?
-    WHERE id = ? AND user_id = ?
-  `);
-
+  db.exec('BEGIN TRANSACTION;');
   try {
+    const updateStmt = db.prepare(`
+      UPDATE jobs SET
+        title = COALESCE(?, title),
+        category = COALESCE(?, category),
+        priority = COALESCE(?, priority),
+        action_type = COALESCE(?, action_type),
+        action_payload = COALESCE(?, action_payload),
+        schedule_type = COALESCE(?, schedule_type),
+        cron_expression = ?,
+        timezone = COALESCE(?, timezone),
+        start_date = COALESCE(?, start_date),
+        start_time = COALESCE(?, start_time),
+        next_run_at = ?,
+        status = COALESCE(?, status),
+        missed_policy = COALESCE(?, missed_policy),
+        repeat = COALESCE(?, repeat),
+        goal = COALESCE(?, goal),
+        notes = COALESCE(?, notes),
+        notes_header = COALESCE(?, notes_header),
+        bullet_points = COALESCE(?, bullet_points),
+        image = COALESCE(?, image),
+        updated_at = ?
+      WHERE id = ? AND user_id = ?
+    `);
+
     updateStmt.run(
       title ? title.trim() : null,
       category || null,
@@ -351,41 +413,52 @@ router.put('/:id', (req, res) => {
       req.user.id
     );
 
-    // Synchronize website restriction update
-    if (actionType === 'restrict_website' || existing.action_type === 'restrict_website') {
-      try {
-        let payload = actionPayload;
-        if (!payload) {
-          payload = JSON.parse(existing.action_payload || '{}');
-        }
-        upsertSiteLimitFromJob(req.params.id, req.user.id, payload, timezone || existing.timezone);
-      } catch (siteErr) {
-        console.warn('Notice: site limit sync during job update:', siteErr.message);
-      }
+    let linkedSiteLimit = null;
+    const finalActionType = actionType || existing.action_type;
+    if (finalActionType === 'restrict_website') {
+      const payload = actionPayload || JSON.parse(existing.action_payload || '{}');
+      linkedSiteLimit = upsertSiteLimitFromJob(req.params.id, req.user.id, payload, timezone || existing.timezone);
+    } else if (existing.action_type === 'restrict_website' && finalActionType !== 'restrict_website') {
+      // Disabled restriction if action type changed
+      db.prepare('UPDATE site_limits SET is_enabled = 0, updated_at = ? WHERE job_id = ? AND user_id = ?')
+        .run(now, req.params.id, req.user.id);
     }
 
+    db.exec('COMMIT;');
+
     const updatedRow = existingStmt.get(req.params.id, req.user.id);
-    return res.json({ job: formatJob(updatedRow) });
+    return res.json({
+      success: true,
+      job: formatJob(updatedRow),
+      siteLimit: linkedSiteLimit,
+    });
   } catch (err) {
+    db.exec('ROLLBACK;');
     console.error('Update job error:', err);
-    return res.status(500).json({ error: 'Failed to update job' });
+    return res.status(500).json({ error: err.message || 'Failed to update job' });
   }
 });
 
-// DELETE job
+// DELETE job (Authoritative transactional operation)
 router.delete('/:id', (req, res) => {
-  const deleteStmt = db.prepare('DELETE FROM jobs WHERE id = ? AND user_id = ?');
-  const result = deleteStmt.run(req.params.id, req.user.id);
-  if (result.changes === 0) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-
-  // Also clean up linked site_limits rule
+  db.exec('BEGIN TRANSACTION;');
   try {
-    db.prepare('DELETE FROM site_limits WHERE job_id = ? AND user_id = ?').run(req.params.id, req.user.id);
-  } catch (e) {}
+    const deleteStmt = db.prepare('DELETE FROM jobs WHERE id = ? AND user_id = ?');
+    const result = deleteStmt.run(req.params.id, req.user.id);
+    if (result.changes === 0) {
+      db.exec('ROLLBACK;');
+      return res.status(404).json({ error: 'Job not found' });
+    }
 
-  res.json({ success: true, message: 'Job deleted' });
+    // Clean up linked site_limits rule
+    db.prepare('DELETE FROM site_limits WHERE job_id = ? AND user_id = ?').run(req.params.id, req.user.id);
+
+    db.exec('COMMIT;');
+    res.json({ success: true, message: 'Job and associated rules deleted successfully' });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: 'Failed to delete job' });
+  }
 });
 
 // Toggle Job status (Completed / Scheduled or Paused / Scheduled)
@@ -399,16 +472,22 @@ router.post('/:id/toggle', (req, res) => {
   const nextStatus = job.status === 'Completed' || job.status === 'Paused' ? 'Scheduled' : 'Paused';
   const now = new Date().toISOString();
 
-  db.prepare('UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?').run(nextStatus, now, job.id);
-
-  // Propagate to linked site_limits rule
+  db.exec('BEGIN TRANSACTION;');
   try {
+    db.prepare('UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?').run(nextStatus, now, job.id);
+
+    // Propagate to linked site_limits rule
     db.prepare('UPDATE site_limits SET is_enabled = ?, updated_at = ? WHERE job_id = ? AND user_id = ?')
       .run(nextStatus === 'Scheduled' ? 1 : 0, now, job.id, req.user.id);
-  } catch (e) {}
 
-  const updated = stmt.get(req.params.id, req.user.id);
-  res.json({ job: formatJob(updated) });
+    db.exec('COMMIT;');
+
+    const updated = stmt.get(req.params.id, req.user.id);
+    res.json({ job: formatJob(updated) });
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    res.status(500).json({ error: 'Failed to toggle job status' });
+  }
 });
 
 // Trigger Job Now (Manual Run)
@@ -422,7 +501,6 @@ router.post('/:id/trigger-now', (req, res) => {
   const execId = `exec-${Date.now()}`;
   const now = new Date().toISOString();
 
-  // Insert execution record with Running status
   const execStmt = db.prepare(`
     INSERT INTO executions (
       id, job_id, user_id, action_type, scheduled_at, started_at, status, trigger_type, created_at
@@ -434,7 +512,7 @@ router.post('/:id/trigger-now', (req, res) => {
   res.json({
     success: true,
     executionId: execId,
-    message: 'Manual execution queued. Will be executed by server or paired local agent.'
+    message: 'Manual execution queued. Will be executed by server or paired local agent.',
   });
 });
 
