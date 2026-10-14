@@ -44,7 +44,7 @@ router.post('/register', (req, res) => {
       VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1, 0, ?)
     `);
     insertSiteLimit.run(`limit-yt-${userId}`, userId, 'youtube.com', 10800, 600, 600, today, now);
-    insertSiteLimit.run(`limit-ig-${userId}`, userId, 'instagram.com', 0, 0, 0, today, 0, 0, now);
+    insertSiteLimit.run(`limit-ig-${userId}`, userId, 'instagram.com', 0, 0, 0, today, now);
 
     const user = { id: userId, email: cleanEmail, fullName: cleanName, role: 'Personal Workspace' };
     const token = generateToken(user);

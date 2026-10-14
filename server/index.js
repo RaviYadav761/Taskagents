@@ -15,7 +15,16 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(cors());
+const allowedOrigins = new Set((process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',').map((origin) => origin.trim()).filter(Boolean));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, origin || true);
+    return callback(new Error('Origin is not allowed by Taskly CORS configuration'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(express.json());
 
 // Mount API routes
@@ -28,12 +37,18 @@ app.use('/api/agent', agentRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({
+  try {
+    db.prepare('SELECT 1 AS ok').get();
+    return res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptimeSeconds: Math.round(process.uptime()),
     database: 'sqlite-connected',
-  });
+    });
+  } catch (error) {
+    console.error('[Health] Database connectivity check failed:', error.message);
+    return res.status(503).json({ status: 'unhealthy', timestamp: new Date().toISOString(), database: 'unavailable' });
+  }
 });
 
 // Cloud Scheduler: Checks every 15 seconds for cloud-executable jobs and marks offline devices

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -6,12 +7,12 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dataDir = path.join(__dirname, 'data');
+const dbPath = path.resolve(process.env.TASKLY_DB_PATH || path.join(__dirname, 'data', 'taskly.db'));
+const dataDir = path.dirname(dbPath);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-const dbPath = path.join(dataDir, 'taskly.db');
 const db = new DatabaseSync(dbPath);
 
 // Enable WAL mode for high concurrency

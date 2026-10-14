@@ -216,6 +216,19 @@ router.post('/', (req, res) => {
     }
   }
 
+  // Replaying a create request after a dropped response must not create a duplicate.
+  const requestId = typeof req.body.clientRequestId === 'string' && /^[a-zA-Z0-9-]{16,80}$/.test(req.body.clientRequestId)
+    ? req.body.clientRequestId
+    : null;
+  const id = requestId ? `job-${req.user.id}-${requestId}` : `job-${Date.now()}`;
+  const prior = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(id, req.user.id);
+  if (prior) {
+    const siteLimit = actionType === 'restrict_website'
+      ? db.prepare('SELECT * FROM site_limits WHERE job_id = ? AND user_id = ?').get(id, req.user.id)
+      : null;
+    return res.status(200).json({ success: true, job: formatJob(prior), siteLimit, idempotentReplay: true });
+  }
+
   // Calculate next run time
   const nextRunAt = getNextRunDate({
     scheduleType,
@@ -225,7 +238,6 @@ router.post('/', (req, res) => {
     timezone,
   });
 
-  const id = `job-${Date.now()}`;
   const now = new Date().toISOString();
 
   // Execute in transaction

@@ -1,11 +1,12 @@
 // Background Service Worker for Taskly Automation & Mindful Usage Controller (Manifest V3)
 import { matchDomain, parseAndNormalizeWebsite, resolveServiceProfile } from './urlHelper.js';
 
-let API_BASE = 'http://localhost:4000/api';
+let API_BASE = '';
 let cachedRules = [];
 let authToken = null;
 let lastSyncTimestamp = null;
 let isInitialized = false;
+let apiSyncSucceeded = false;
 
 // Initialize on service worker start
 const initPromise = initServiceWorker();
@@ -13,9 +14,9 @@ const initPromise = initServiceWorker();
 async function initServiceWorker() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
-      ['cached_rules', 'taskly_jwt_token', 'taskly_api_base', 'last_sync_timestamp'],
+      ['cached_rules', 'taskly_jwt_token', 'taskly_api_url', 'taskly_api_base', 'last_sync_timestamp'],
       async (res) => {
-        if (res.taskly_api_base) API_BASE = res.taskly_api_base;
+        try { API_BASE = normalizeExtensionApiBase(res.taskly_api_url || res.taskly_api_base || ''); } catch { API_BASE = ''; }
         if (res.taskly_jwt_token) authToken = res.taskly_jwt_token;
         if (res.cached_rules && Array.isArray(res.cached_rules)) {
           cachedRules = res.cached_rules;
@@ -59,6 +60,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+function normalizeExtensionApiBase(value) {
+  const parsed = new URL(String(value || '').trim());
+  if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error('Invalid API URL');
+  if (parsed.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(parsed.hostname)) throw new Error('HTTP is permitted only for local development');
+  const path = parsed.pathname.replace(/\/+$/, '').replace(/(?:\/api)+$/i, '');
+  return `${parsed.origin}${path}/api`;
+}
+
 async function getStoredToken() {
   await initPromise;
   return new Promise((resolve) => {
@@ -74,14 +83,21 @@ async function getStoredToken() {
 async function refreshRules() {
   await initPromise;
   authToken = await getStoredToken();
+  apiSyncSucceeded = false;
 
   try {
+    if (!API_BASE) throw new Error('Extension API URL is not configured. Set it in the extension popup.');
     const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
     const res = await fetch(`${API_BASE}/site-limits`, { headers });
+    if (!res.ok) {
+      const category = res.status === 401 || res.status === 403 ? 'authentication failure' : [502, 503, 504].includes(res.status) ? 'unreachable backend' : 'HTTP error';
+      console.warn('[Taskly Extension API]', { endpoint: '/api/site-limits', category, status: res.status, responseReceived: true, remediation: category === 'authentication failure' ? 'Relink the extension.' : 'Check API URL, backend availability, and backend logs.' });
+    }
     if (res.ok) {
       const data = await res.json();
       if (data.limits && Array.isArray(data.limits)) {
         cachedRules = data.limits;
+        apiSyncSucceeded = true;
         lastSyncTimestamp = new Date().toISOString();
         await new Promise((r) =>
           chrome.storage.local.set(
@@ -94,6 +110,8 @@ async function refreshRules() {
       }
     }
   } catch (err) {
+    const category = err instanceof TypeError ? 'network failure' : 'unreachable backend';
+    console.warn('[Taskly Extension API]', { endpoint: '/api/site-limits', category, status: null, responseReceived: false, remediation: 'Check the configured API URL and backend availability; this alone does not prove a CORS error.' });
     // Offline mode: continue enforcing from cached rules
   }
 
@@ -542,6 +560,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       await chrome.storage.local.remove(['taskly_jwt_token', 'cached_rules']);
       authToken = null;
       cachedRules = [];
+      apiSyncSucceeded = false;
       await syncDeclarativeNetRequestRules([]);
       sendResponse({ success: true });
       return;
@@ -549,7 +568,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.type === 'REFRESH_RULES') {
       const rules = await refreshRules();
-      sendResponse({ success: true, rules, lastSync: lastSyncTimestamp });
+      sendResponse({ success: apiSyncSucceeded, rules, lastSync: lastSyncTimestamp, isApiConnected: apiSyncSucceeded });
+      return;
+    }
+
+    if (request.type === 'API_CONFIG_UPDATED') {
+      const config = await new Promise((resolve) => chrome.storage.local.get(['taskly_api_url'], resolve));
+      API_BASE = normalizeExtensionApiBase(config.taskly_api_url);
+      const rules = await refreshRules();
+      sendResponse({ success: apiSyncSucceeded, rulesCount: rules.length, lastSync: lastSyncTimestamp, error: apiSyncSucceeded ? undefined : 'API is reachable, but authenticated rule synchronization did not succeed.' });
       return;
     }
 
@@ -559,6 +586,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         isAuthenticated: Boolean(authToken),
         rulesCount: cachedRules.length,
         lastSync: lastSyncTimestamp,
+        isApiConnected: apiSyncSucceeded,
       });
       return;
     }
@@ -738,6 +766,7 @@ async function handleEmergencyOverride(domain) {
 
 async function handlePairExtension(tokenOrCode) {
   if (!tokenOrCode) return { success: false, error: 'Token or code required' };
+  if (!API_BASE) return { success: false, error: 'Configure and validate the Taskly API URL in the extension popup first.' };
 
   let token = tokenOrCode.trim();
 
@@ -759,9 +788,17 @@ async function handlePairExtension(tokenOrCode) {
     }
   }
 
+  const previousToken = await getStoredToken();
   authToken = token;
   await new Promise((r) => chrome.storage.local.set({ taskly_jwt_token: token }, r));
   const rules = await refreshRules();
+  if (!apiSyncSucceeded) {
+    authToken = previousToken;
+    await new Promise((r) => previousToken
+      ? chrome.storage.local.set({ taskly_jwt_token: previousToken }, r)
+      : chrome.storage.local.remove(['taskly_jwt_token'], r));
+    return { success: false, error: 'Pairing token could not authenticate a current rules sync. Check API URL, account token, CORS, and backend logs.' };
+  }
   return { success: true, rulesCount: rules.length };
 }
 

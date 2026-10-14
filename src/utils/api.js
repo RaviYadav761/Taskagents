@@ -1,6 +1,67 @@
-// API Client for Taskly Automation Platform
-const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || 'http://localhost:4000/api';
+// Local development may use the documented localhost default. Production must be explicitly configured.
+export function normalizeApiBase(value, { production = false, development = false } = {}) {
+  const raw = String(value || '').trim();
+  if (!raw && development && !production) return 'http://localhost:4000/api';
+  if (!raw) throw new Error('Taskly API is not configured. Set VITE_API_URL and rebuild/redeploy the frontend.');
+  let parsed;
+  try { parsed = new URL(raw); } catch { throw new Error('Invalid VITE_API_URL: use an absolute URL such as https://YOUR-ACTUAL-API-HOST/api.'); }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('Invalid VITE_API_URL: use an HTTP(S) URL without credentials, query parameters, or fragments.');
+  }
+  if (production && parsed.protocol !== 'https:') throw new Error('Production requires VITE_API_URL to use HTTPS.');
+  if (production && /(^|\.)localhost$|^127\./i.test(parsed.hostname)) throw new Error('Production VITE_API_URL cannot point to localhost. Configure your deployed HTTPS API host.');
+  const path = parsed.pathname.replace(/\/+$/, '').replace(/(?:\/api)+$/i, '');
+  return `${parsed.origin}${path}/api`;
+}
+let API_BASE = '';
+let API_CONFIG_ERROR = '';
+try {
+  API_BASE = normalizeApiBase(import.meta.env?.VITE_API_URL, { production: import.meta.env?.PROD, development: import.meta.env?.DEV });
+} catch (error) { API_CONFIG_ERROR = error.message; }
 const LOCAL_AGENT_IPC = 'http://127.0.0.1:47891';
+
+function diagnosticCategory(status) {
+  if (status === 401 || status === 403) return 'authentication failure';
+  if ([502, 503, 504].includes(status)) return 'unreachable backend';
+  return 'HTTP error';
+}
+function remediation(category) {
+  if (category === 'network failure') return 'Check the API URL and connectivity; this alone does not establish a CORS error.';
+  if (category === 'unreachable backend') return 'Confirm the persistent backend service is running and reachable.';
+  if (category === 'authentication failure') return 'Sign in again or relink the extension with a valid account.';
+  if (category === 'invalid response') return 'Confirm the configured host serves the Taskly API and valid JSON.';
+  return 'Inspect the backend response and server logs for this endpoint.';
+}
+// Wrap API fetches to log endpoint/status only—never request headers or credentials.
+async function fetch(input, options = {}) {
+  return fetchWithDiagnostics(input, options, true);
+}
+export async function requestWithDiagnostics(input, options = {}) {
+  return fetchWithDiagnostics(input, options, false);
+}
+async function fetchWithDiagnostics(input, options, requireConfigured) {
+  const url = String(input);
+  const endpoint = (() => { try { return new URL(url, globalThis.location?.origin).pathname; } catch { return url.split('?')[0]; } })();
+  const isJobCreate = endpoint.endsWith('/api/jobs');
+  const ruleSaved = isJobCreate ? 'not confirmed by this failed request' : 'not applicable';
+  if (requireConfigured && !API_BASE) throw new Error(`${API_CONFIG_ERROR || 'Taskly API URL is not configured.'} Request not sent: ${endpoint}`);
+  try {
+    const response = await globalThis.fetch(input, options);
+    if (!response.ok) {
+      const category = diagnosticCategory(response.status);
+      console.error('[Taskly API]', { endpoint, category, status: response.status, responseReceived: true, ruleSaved, extensionConnectedAndSynced: 'not verified', remediation: remediation(category) });
+    }
+    return response;
+  } catch (cause) {
+    const category = cause?.name === 'AbortError' || cause?.name === 'TimeoutError' ? 'unreachable backend' : 'network failure';
+    console.error('[Taskly API]', { endpoint, category, status: null, responseReceived: false, ruleSaved: isJobCreate ? 'unknown: server may have committed before connection failed' : 'not applicable', extensionConnectedAndSynced: 'not verified', remediation: remediation(category) });
+    throw new Error(`${category === 'network failure' ? 'Network failure before an HTTP response' : 'Backend could not be reached'} at ${endpoint}. ${remediation(category)}`, { cause });
+  }
+}
+async function parseResponse(res, endpoint) {
+  try { return await res.json(); }
+  catch { console.error('[Taskly API]', { endpoint, category: 'invalid response', status: res.status, responseReceived: true, remediation: remediation('invalid response') }); throw new Error(`Invalid response from ${endpoint} (HTTP ${res.status}). ${remediation('invalid response')}`); }
+}
 
 function getAuthHeader() {
   try {
@@ -12,6 +73,14 @@ function getAuthHeader() {
 }
 
 export const api = {
+  getApiBase() { if (!API_BASE) throw new Error(API_CONFIG_ERROR); return API_BASE; },
+  async checkHealth() {
+    const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(5000) });
+    const data = await parseResponse(res, '/api/health');
+    if (!res.ok) throw new Error(`${diagnosticCategory(res.status)} at /api/health (HTTP ${res.status}): ${data.error || remediation(diagnosticCategory(res.status))}`);
+    if (data.status !== 'healthy' || data.database !== 'sqlite-connected') throw new Error('Invalid response from /api/health: backend/database is not healthy.');
+    return data;
+  },
   // Auth
   async register(email, password, fullName) {
     const res = await fetch(`${API_BASE}/auth/register`, {

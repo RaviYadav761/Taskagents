@@ -249,7 +249,7 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
     try {
       // Authoritative transactional backend update:
       // updates the job AND the linked site_limit atomically in one SQLite transaction
-      await api.updateJob(updatedTask.id, {
+      const saved = await api.updateJob(updatedTask.id, {
         title: updatedTask.title,
         category: updatedTask.category,
         priority: updatedTask.priority,
@@ -270,7 +270,7 @@ const EditTaskModal = ({ isOpen, onClose, task, onUpdateTask }) => {
       });
 
       if (onUpdateTask) {
-        onUpdateTask(updatedTask);
+        onUpdateTask({ ...updatedTask, ...saved.job, dueDate: saved.job?.startDate || updatedTask.dueDate });
       }
       setIsSubmitting(false);
       onClose();

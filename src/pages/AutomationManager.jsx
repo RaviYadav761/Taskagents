@@ -362,7 +362,7 @@ const AutomationManager = ({
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-sm font-black text-neutral-900">Configured Website Usage Rules</h2>
-              <p className="text-xs text-neutral-500">Rules are automatically synchronized and enforced by the Taskly Extension.</p>
+              <p className="text-xs text-neutral-500">Rules are stored in your account. Enforcement requires a paired extension to sync successfully and have permission for each website.</p>
             </div>
             <div className="flex items-center gap-2">
               <button

@@ -18,6 +18,9 @@ dist-ssr
 !.env.example
 
 # Local SQLite databases and journal files
+*.db
+*.sqlite
+*.sqlite3
 *.db-shm
 *.db-wal
 *.db-journal

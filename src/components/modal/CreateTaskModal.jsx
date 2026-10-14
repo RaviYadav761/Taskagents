@@ -158,6 +158,7 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
   const [notesText, setNotesText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const createRequestId = useRef(null);
 
   // Element refs for triggering pickers
   const fileInputRef = useRef(null);
@@ -409,7 +410,10 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
     setSubmitError(null);
 
     try {
+      await api.checkHealth();
+      if (!createRequestId.current) createRequestId.current = crypto.randomUUID();
       const res = await api.createJob({
+        clientRequestId: createRequestId.current,
         title: name,
         category,
         priority: actionType !== "standard" ? "High Priority" : "Medium Priority",
@@ -429,10 +433,15 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
         image: selectedImage || "/assets/laptop.jpg",
       });
 
-      if (res?.job) {
-        onAddTask(res.job);
+      if (!res?.job || (actionType === "restrict_website" && !res.siteLimit)) {
+        throw new Error("The server did not confirm both the task and website rule. The form remains open; check the backend before retrying.");
+      }
+      onAddTask(res.job);
+      if (actionType === "restrict_website") {
+        console.info("[Taskly] API persistence confirmed; extension synchronization/enforcement is not yet verified.");
       }
       onClose();
+      createRequestId.current = null;
 
       // Reset form on success
       setTaskName("");
@@ -440,7 +449,10 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
       setActionType("standard");
     } catch (err) {
       console.error("Task creation failed:", err);
-      setSubmitError(err.message || "Failed to save and sync automation task. Please check server connection.");
+      const message = err.message || "Failed to save automation task. Please check server connection.";
+      setSubmitError(/Network failure before an HTTP response|Backend could not be reached/i.test(message)
+        ? `${message} The save outcome is unknown because no response arrived. Retry this unchanged form safely; the request is idempotent.`
+        : message);
     } finally {
       setIsSubmitting(false);
     }
