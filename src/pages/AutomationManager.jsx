@@ -30,6 +30,7 @@ import { api } from "../utils/api";
 
 const AutomationManager = ({
   onOpenCreateModal,
+  onOpenWebsiteRuleModal,
   onEditTask,
   tasks = [],
 }) => {
@@ -45,6 +46,7 @@ const AutomationManager = ({
   const [extensionPairingLoading, setExtensionPairingLoading] = useState(false);
   const [selectedExecutionLog, setSelectedExecutionLog] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState("");
   const [activeTab, setActiveTab] = useState("all"); // 'all' | 'rules' | 'analytics' | 'history'
   const [actionMessage, setActionMessage] = useState(null);
 
@@ -62,6 +64,18 @@ const AutomationManager = ({
   const loadData = async () => {
     try {
       setLoading(true);
+
+      try {
+        await api.checkHealth();
+        setApiError("");
+      } catch (error) {
+        setApiError(error.message || "Taskly API is unavailable.");
+        setJobs([]);
+        setExecutions([]);
+        setSiteLimits([]);
+        setDevices([]);
+        return;
+      }
 
       // Check local agent IPC
       const agentRes = await api.checkLocalAgent();
@@ -273,6 +287,17 @@ const AutomationManager = ({
         </div>
       </div>
 
+      {apiError && (
+        <div role="alert" className="mb-6 flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-900">
+          <AlertCircle size={18} className="mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-bold">Website rules cannot be saved or enforced right now.</p>
+            <p className="mt-1 text-xs leading-relaxed">Taskly's API/database is unavailable. {apiError}</p>
+            <p className="mt-1 text-xs leading-relaxed">No rule becomes active until the API saves it and a paired Chrome extension syncs it with permission for the site.</p>
+          </div>
+        </div>
+      )}
+
       {/* Device & Local Agent Status Card */}
       <div className="mb-6 p-4 sm:p-5 rounded-3xl bg-white border border-[#E2DDD3] shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-start sm:items-center gap-3.5">
@@ -362,7 +387,7 @@ const AutomationManager = ({
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-sm font-black text-neutral-900">Configured Website Usage Rules</h2>
-              <p className="text-xs text-neutral-500">Rules are stored in your account. Enforcement requires a paired extension to sync successfully and have permission for each website.</p>
+              <p className="text-xs text-neutral-500">A rule is stored only after the API confirms it. Enforcement requires a paired extension to sync successfully and have permission for each website.</p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -375,7 +400,7 @@ const AutomationManager = ({
                 <span>Connect Chrome Extension</span>
               </button>
               <button
-                onClick={onOpenCreateModal}
+                onClick={onOpenWebsiteRuleModal || onOpenCreateModal}
                 className="px-3 py-1.5 bg-neutral-900 hover:bg-black text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
               >
                 <Plus size={14} />

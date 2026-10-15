@@ -89,10 +89,10 @@ const ACTION_TYPES = [
   { id: "notification", label: "Desktop Reminder / Alert", icon: Bell },
 ];
 
-const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
+const CreateTaskModal = ({ isOpen, onClose, onAddTask, initialActionType = "standard" }) => {
   const todayISO = new Date().toISOString().split("T")[0];
 
-  const [taskName, setTaskName] = useState("");
+  const [taskName, setTaskName] = useState(initialActionType === "restrict_website" ? "Habit & Website Control" : "");
   const [selectedImage, setSelectedImage] = useState("/assets/dumbbell.jpg");
 
   // Date states
@@ -110,7 +110,7 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
   const [missedPolicy, setMissedPolicy] = useState("run_once"); // 'run_once' | 'skip' | 'require_confirmation'
 
   // Action & Automation state
-  const [actionType, setActionType] = useState("standard");
+  const [actionType, setActionType] = useState(initialActionType);
   const [scriptPath, setScriptPath] = useState("");
   const [runtime, setRuntime] = useState("node");
   const [scriptArgs, setScriptArgs] = useState("");
@@ -144,7 +144,7 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
   const [websiteEndDate, setWebsiteEndDate] = useState(todayISO);
 
   // Goal state
-  const [goal, setGoal] = useState("");
+  const [goal, setGoal] = useState(initialActionType === "restrict_website" ? "Enforce daily usage limit & focus breaks" : "");
 
   // Notes states
   const [notesMode, setNotesMode] = useState("points"); // 'text' | 'points'
@@ -620,9 +620,12 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
                   <span>Dynamic Website Restriction & Mindful Usage</span>
                 </div>
                 <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
-                  Extension Enforced
+                  Requires Extension Sync
                 </span>
               </div>
+              <p className="text-[10px] leading-relaxed text-amber-900">
+                This rule does not block the site until the API saves it, a paired Chrome extension syncs it, and that extension has permission for the website.
+              </p>
 
               {/* Website URL Input */}
               <div>
@@ -956,7 +959,7 @@ const CreateTaskModal = ({ isOpen, onClose, onAddTask }) => {
               )}
 
               <p className="text-[10px] text-neutral-500 leading-tight">
-                Synced with Taskly Chrome Extension. Uses active-tab tracking (idle/hidden tabs are not counted).
+                After the API confirms the save, a paired Taskly Chrome extension can enforce this rule. It uses active-tab tracking (idle/hidden tabs are not counted).
               </p>
             </div>
           )}

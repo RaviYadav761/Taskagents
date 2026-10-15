@@ -113,6 +113,14 @@ const Homepage = () => {
 
   // Modals
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [createModalActionType, setCreateModalActionType] = useState("standard");
+  const [createModalInstance, setCreateModalInstance] = useState(0);
+  const openCreateTaskModal = (actionType = "standard") => {
+    const nextActionType = typeof actionType === "string" ? actionType : "standard";
+    setCreateModalActionType(nextActionType);
+    setCreateModalInstance((instance) => instance + 1);
+    setIsCreateModalOpen(true);
+  };
   const [isChatbotOpen, setIsChatbotOpen] = useState(false);
   const [isSynopsisOpen, setIsSynopsisOpen] = useState(false);
 
@@ -600,7 +608,7 @@ const Homepage = () => {
           )}
           <button
             type="button"
-            onClick={() => setIsCreateModalOpen(true)}
+            onClick={() => openCreateTaskModal()}
             className="p-2 rounded-xl bg-neutral-900 text-white hover:bg-black transition-colors cursor-pointer shadow-2xs flex items-center gap-1 text-xs font-bold"
             title="Create Task"
           >
@@ -622,7 +630,7 @@ const Homepage = () => {
               selectedTaskId={selectedTaskId}
               onSelectTask={setSelectedTaskId}
               onAddTask={handleAddTask}
-              onOpenCreateModal={() => setIsCreateModalOpen(true)}
+              onOpenCreateModal={openCreateTaskModal}
             />
           </div>
 
@@ -653,7 +661,7 @@ const Homepage = () => {
               </p>
             </div>
             <button
-              onClick={() => setIsCreateModalOpen(true)}
+              onClick={() => openCreateTaskModal()}
               className="px-4 py-2.5 bg-neutral-900 hover:bg-black text-white text-xs font-bold rounded-2xl flex items-center gap-2 shadow-sm cursor-pointer"
             >
               <Plus size={16} />
@@ -682,7 +690,7 @@ const Homepage = () => {
               setEditingTask(task);
             }}
             onDelete={handleDeleteTask}
-            onOpenCreateModal={() => setIsCreateModalOpen(true)}
+            onOpenCreateModal={openCreateTaskModal}
             onSelectTask={(id) => {
               setSelectedTaskId(id);
               setActiveTab("home");
@@ -695,7 +703,7 @@ const Homepage = () => {
           tasks={tasks}
           onToggleStatus={handleToggleTaskStatus}
           onAddTask={handleAddTask}
-          onOpenCreateModal={() => setIsCreateModalOpen(true)}
+          onOpenCreateModal={openCreateTaskModal}
           onSelectTask={(id) => {
             setSelectedTaskId(id);
             setActiveTab("home");
@@ -704,7 +712,8 @@ const Homepage = () => {
       ) : activeTab === "automations" ? (
         // AUTOMATION & CRON SCHEDULER: Real scheduled scripts, habit restrictions, execution history
         <AutomationManager
-          onOpenCreateModal={() => setIsCreateModalOpen(true)}
+          onOpenCreateModal={() => openCreateTaskModal()}
+          onOpenWebsiteRuleModal={() => openCreateTaskModal("restrict_website")}
           onEditTask={(task) => setEditingTask(task)}
           tasks={tasks}
         />
@@ -759,7 +768,7 @@ const Homepage = () => {
             onSelectTimerTask={handleSelectTimerTask}
             focusStats={focusStats}
             onCompleteEarly={handleCompleteEarly}
-            onOpenCreateModal={() => setIsCreateModalOpen(true)}
+            onOpenCreateModal={openCreateTaskModal}
             onOpenChatbot={() => setIsChatbotOpen(true)}
             onFilterChange={() => setActiveTab("my-tasks")}
             onToggleStatus={handleToggleTaskStatus}
@@ -796,7 +805,9 @@ const Homepage = () => {
 
       {/* Create Task Modal matching Image 2 */}
       <CreateTaskModal
+        key={createModalInstance}
         isOpen={isCreateModalOpen}
+        initialActionType={createModalActionType}
         onClose={() => setIsCreateModalOpen(false)}
         onAddTask={handleAddTask}
       />
