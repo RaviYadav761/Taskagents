@@ -15,30 +15,34 @@ import Notes from "./Notes";
 import Settings from "./Settings";
 import AutomationManager from "./AutomationManager";
 import { INITIAL_TASKS } from "../data/initialTasks";
-import { Bot, Info, Plus, Menu, Check, Flame } from "lucide-react";
+import { Bot, Info, Plus, Menu, Flame } from "lucide-react";
 import { playVictoryChime } from "../utils/audio";
 import { api } from "../utils/api";
+import { supabase, toTasklyUser } from "../utils/supabase";
 
 const LOCAL_STORAGE_KEY = "ravi_taskly_tasks_v3";
 const AUTH_STORAGE_KEY = "taskly_auth_user";
+const DEMO_SESSION_KEY = "taskly_demo_session";
 
 const Homepage = () => {
-  // Current logged in user session (Auth modal is first screen if not authenticated)
+  // Real sessions are restored only from Supabase; local profile data is not proof of login.
   const [currentUser, setCurrentUser] = useState(() => {
     try {
-      const saved = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {}
+      if (localStorage.getItem(DEMO_SESSION_KEY) === "true") {
+        const saved = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null");
+        if (saved?.id === "demo-alex") return saved;
+      }
+    } catch {}
     return null;
   });
 
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(() => {
     try {
-      const saved = localStorage.getItem(AUTH_STORAGE_KEY);
-      return !saved; // First screen is Sign In / Create Account if not signed in!
-    } catch (e) {}
+      return localStorage.getItem(DEMO_SESSION_KEY) !== "true";
+    } catch {}
     return true;
   });
+  const [authMode, setAuthMode] = useState("signin");
 
   // Load tasks from LocalStorage or user workspace
   const [tasks, setTasks] = useState(() => {
@@ -318,6 +322,8 @@ const Homepage = () => {
   // Auth Handlers
   const handleLogin = (user) => {
     setCurrentUser(user);
+    localStorage.removeItem(DEMO_SESSION_KEY);
+    localStorage.removeItem("taskly_jwt_token");
     localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
 
     const email = user.email ? user.email.toLowerCase() : "";
@@ -378,6 +384,8 @@ const Homepage = () => {
       avatar: "/assets/avatar.jpg",
     };
     setCurrentUser(demoUser);
+    localStorage.setItem(DEMO_SESSION_KEY, "true");
+    localStorage.removeItem("taskly_jwt_token");
     localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(demoUser));
     setTasks(INITIAL_TASKS);
     setSelectedTaskId(INITIAL_TASKS[0]?.id || "");
@@ -400,10 +408,18 @@ const Homepage = () => {
   };
 
   const handleLogout = () => {
+    localStorage.removeItem(DEMO_SESSION_KEY);
     localStorage.removeItem(AUTH_STORAGE_KEY);
+    localStorage.removeItem("taskly_jwt_token");
     setCurrentUser(null);
+    setAuthMode("signin");
     setIsAuthModalOpen(true);
     setActiveTab("home");
+    if (supabase) {
+      supabase.auth.signOut().catch((error) => {
+        console.error("Could not sign out from the authentication provider:", error);
+      });
+    }
   };
 
   // Synchronize settings & theme
@@ -501,6 +517,53 @@ const Homepage = () => {
       console.warn("Notice: Task toggle buffered offline:", err.message);
     });
   };
+
+  useEffect(() => {
+    if (!supabase) return undefined;
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthMode("recovery");
+        setCurrentUser(null);
+        setIsAuthModalOpen(true);
+        return;
+      }
+
+      if (session?.user) {
+        const user = toTasklyUser(session.user);
+        if (!user) return;
+        localStorage.removeItem(DEMO_SESSION_KEY);
+        localStorage.removeItem("taskly_jwt_token");
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
+        setCurrentUser(user);
+        setIsAuthModalOpen(false);
+
+        try {
+          const savedTasks = localStorage.getItem(`taskly_tasks_${user.email.toLowerCase()}`);
+          const accountTasks = savedTasks ? JSON.parse(savedTasks) : [];
+          if (Array.isArray(accountTasks)) {
+            setTasks(accountTasks);
+            setSelectedTaskId(accountTasks[0]?.id || "");
+          }
+        } catch (error) {
+          console.error("Failed to load this account's local tasks:", error);
+        }
+        return;
+      }
+
+      if (event === "INITIAL_SESSION" || event === "SIGNED_OUT") {
+        if (localStorage.getItem(DEMO_SESSION_KEY) !== "true") {
+          localStorage.removeItem(AUTH_STORAGE_KEY);
+          localStorage.removeItem("taskly_jwt_token");
+          setCurrentUser(null);
+          setAuthMode("signin");
+          setIsAuthModalOpen(true);
+        }
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   // Compute counts for dashboard tabs
   const todayStr = new Date().toISOString().split("T")[0];
@@ -794,7 +857,9 @@ const Homepage = () => {
 
       {/* Auth Modal for Sign In, Create Account (clean workspace) & Demo */}
       <AuthModal
+        key={authMode}
         isOpen={isAuthModalOpen}
+        initialMode={authMode}
         onLogin={handleLogin}
         onContinueDemo={handleContinueDemo}
       />

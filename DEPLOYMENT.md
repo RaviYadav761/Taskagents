@@ -20,6 +20,8 @@ JWT_SECRET=replace-with-a-random-development-secret
 TASKLY_DB_PATH=./server/data/taskly.db
 CORS_ORIGINS=http://localhost:5173
 VITE_API_URL=http://localhost:4000/api
+VITE_SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
+VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
 ```
 
 Run the API and frontend in separate terminals:
@@ -52,13 +54,19 @@ The extension's optional host permission request is per API origin. For a custom
 
 ## Vercel frontend
 
-Configure this **build-time** variable in the Vercel project's Environment Variables for Production (and Preview if desired):
+Configure these **build-time** variables in the Vercel project's Environment Variables for Production (and Preview if desired):
 
 ```dotenv
 VITE_API_URL=https://YOUR-ACTUAL-API-HOST/api
+VITE_SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
+VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
 ```
 
-This is a placeholder, not a production hostname. Replace it with the actual HTTPS API URL after the backend exists. Vite embeds this value into the static bundle at build time: **redeploy/rebuild the Vercel frontend after changing it**. Production builds reject missing, HTTP, localhost, malformed, or credential/query-bearing API URLs and never fall back to localhost.
+`VITE_API_URL` is a placeholder, not a production hostname. Replace it with the actual HTTPS API URL after the backend exists. The Supabase values are the project URL and **publishable/anon** key only; never put a service-role key in a `VITE_` variable. In Supabase Auth URL Configuration, set the production Site URL to `https://taskagents.vercel.app` and allow that exact redirect URL (plus the local development URL only if needed). Keep email confirmation enabled. Vite embeds these values at build time: **redeploy/rebuild after changing them**. Production API builds reject missing, HTTP, localhost, malformed, or credential/query-bearing API URLs and never fall back to localhost.
+
+Email/password signup confirmation and password reset use Supabase Auth emails. Supabase's built-in sender is limited to project-team addresses and currently has a low rate limit; it is not suitable for public users. This setup intentionally adds no SMTP/email vendor, Google sign-in, or OTP. Until a production email sender is configured separately, public users may not receive signup or reset emails.
+
+This auth change stores and verifies account credentials in Supabase Auth. It does not migrate Taskly tasks, notes, website rules, or other workspace data from the existing local/SQLite API storage into Supabase; those remain governed by the existing frontend/API deployment configuration.
 
 Deploy the Vite project with the existing `vercel.json` build/output configuration. Do not add backend routes as Vercel serverless functions.
 
