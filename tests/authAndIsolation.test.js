@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
 import { hashPassword, comparePassword, generateToken, verifyToken, generatePairingCode } from '../server/auth.js';
 
 describe('Multi-User Security & Isolation - Phase 12', () => {
@@ -11,6 +12,16 @@ describe('Multi-User Security & Isolation - Phase 12', () => {
     assert.notEqual(hashed, rawPass);
     assert.equal(comparePassword(rawPass, hashed), true);
     assert.equal(comparePassword('WrongPassword123', hashed), false);
+  });
+
+  it('refuses to use a default JWT signing secret in production', () => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', "import('./server/auth.js')"], {
+      cwd: process.cwd(),
+      env: { ...process.env, NODE_ENV: 'production', JWT_SECRET: '' },
+      encoding: 'utf8',
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /JWT_SECRET must be configured/);
   });
 
   it('generates valid JWT tokens and extracts user claims', () => {

@@ -1,4 +1,5 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import db from '../db.js';
 import { hashPassword, comparePassword, generateToken, authenticateUser } from '../auth.js';
 
@@ -11,12 +12,22 @@ export const activeExtensionPairingCodes = new Map();
 router.post('/register', (req, res) => {
   const { email, password, fullName } = req.body;
 
-  if (!email || !password || !fullName) {
+  if (typeof email !== 'string' || typeof password !== 'string' || typeof fullName !== 'string') {
     return res.status(400).json({ error: 'Email, password, and full name are required' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
   const cleanName = fullName.trim();
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 254) {
+    return res.status(400).json({ error: 'Enter a valid email address' });
+  }
+  if (password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters and no more than 72 UTF-8 bytes' });
+  }
+  if (!cleanName || cleanName.length > 100) {
+    return res.status(400).json({ error: 'Full name must be between 1 and 100 characters' });
+  }
 
   // Check existing user
   const existingStmt = db.prepare('SELECT id FROM users WHERE email = ?');
@@ -25,7 +36,7 @@ router.post('/register', (req, res) => {
     return res.status(400).json({ error: 'An account with this email already exists' });
   }
 
-  const userId = `user-${Date.now()}`;
+  const userId = `user-${randomUUID()}`;
   const passwordHash = hashPassword(password);
   const now = new Date().toISOString();
 

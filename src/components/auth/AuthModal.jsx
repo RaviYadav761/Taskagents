@@ -1,14 +1,21 @@
-import React, { useState } from "react";
-import { LogIn, UserPlus, Sparkles, CheckCircle2, Shield, ArrowRight } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { LogIn, UserPlus, Sparkles, CheckCircle2, ArrowRight } from "lucide-react";
 import { api } from "../../utils/api";
 
-const AuthModal = ({ isOpen, onLogin, onSignUp, onContinueDemo }) => {
+const AuthModal = ({ isOpen, onLogin, onContinueDemo }) => {
   const [isSignUp, setIsSignUp] = useState(false);
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.removeItem("taskly_registered_users");
+    } catch {}
+  }, []);
 
   if (!isOpen) return null;
 
@@ -18,9 +25,8 @@ const AuthModal = ({ isOpen, onLogin, onSignUp, onContinueDemo }) => {
     setSuccessMsg("");
 
     const trimmedEmail = email.trim().toLowerCase();
-    const trimmedPass = password.trim();
 
-    if (!trimmedEmail || !trimmedPass) {
+    if (!trimmedEmail || !password) {
       setError("Please fill in all required fields.");
       return;
     }
@@ -30,71 +36,27 @@ const AuthModal = ({ isOpen, onLogin, onSignUp, onContinueDemo }) => {
       return;
     }
 
-    const registeredUsersKey = "taskly_registered_users";
-    let users = {};
-    try {
-      users = JSON.parse(localStorage.getItem(registeredUsersKey) || "{}");
-    } catch (e) {}
-
-    if (isSignUp) {
-      try {
-        await api.register(trimmedEmail, trimmedPass, fullName.trim());
-      } catch (err) {
-        console.warn("Backend auth notice:", err.message);
-      }
-
-      // 1. Register new user locally
-      const newUser = {
-        id: `user-${Date.now()}`,
-        fullName: fullName.trim(),
-        email: trimmedEmail,
-        password: trimmedPass,
-        role: "Personal Workspace",
-        avatar: "/assets/avatar.jpg",
-        isNewUser: true,
-      };
-
-      users[trimmedEmail] = newUser;
-      try {
-        localStorage.setItem(registeredUsersKey, JSON.stringify(users));
-        // Initialize an empty workspace for the new user
-        localStorage.setItem(`taskly_tasks_${trimmedEmail}`, JSON.stringify([]));
-        localStorage.setItem(`taskly_notes_${trimmedEmail}`, JSON.stringify([]));
-      } catch (err) {}
-
-      // Prompt user to sign in
-      setSuccessMsg("Account created successfully! Please sign in with your password.");
-      setIsSignUp(false);
+    if (isSignUp && (password.length < 8 || password.length > 72)) {
+      setError("Choose a password with at least 8 characters (maximum 72 UTF-8 bytes).");
       return;
     }
 
-    // 2. Sign In
+    setIsSubmitting(true);
     try {
-      await api.login(trimmedEmail, trimmedPass);
+      const result = isSignUp
+        ? await api.register(trimmedEmail, password, fullName.trim())
+        : await api.login(trimmedEmail, password);
+
+      if (!result?.user) {
+        throw new Error("The authentication server did not return a valid account.");
+      }
+
+      onLogin({ ...result.user, isNewUser: isSignUp });
     } catch (err) {
-      // If user is registered on backend but failed password
-      if (err.message && err.message.includes("Invalid email or password")) {
-        setError("Incorrect password. Please try again.");
-        return;
-      }
+      setError(err.message || "Authentication failed. Please try again.");
+    } finally {
+      setIsSubmitting(false);
     }
-
-    const foundUser = users[trimmedEmail];
-    if (foundUser && foundUser.password !== trimmedPass) {
-      setError("Incorrect password. Please try again.");
-      return;
-    }
-
-    const signedInUser = foundUser || {
-      id: `user-${trimmedEmail}`,
-      fullName: fullName.trim() || trimmedEmail.split("@")[0] || "Taskly User",
-      email: trimmedEmail,
-      role: "Personal Workspace",
-      avatar: "/assets/avatar.jpg",
-      isNewUser: !foundUser,
-    };
-
-    onLogin(signedInUser);
   };
 
   return (
@@ -213,17 +175,18 @@ const AuthModal = ({ isOpen, onLogin, onSignUp, onContinueDemo }) => {
           {/* Submit Button */}
           <button
             type="submit"
-            className="w-full mt-2 py-3 bg-neutral-900 hover:bg-black text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer flex items-center justify-center gap-2 hover:scale-102"
+            disabled={isSubmitting}
+            className="w-full mt-2 py-3 bg-neutral-900 hover:bg-black disabled:opacity-60 disabled:cursor-wait text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer flex items-center justify-center gap-2 hover:scale-102"
           >
             {isSignUp ? (
               <>
                 <UserPlus size={15} />
-                <span>Create Clean Workspace</span>
+                <span>{isSubmitting ? "Creating account…" : "Create Clean Workspace"}</span>
               </>
             ) : (
               <>
                 <LogIn size={15} />
-                <span>Sign In to Taskly</span>
+                <span>{isSubmitting ? "Signing in…" : "Sign In to Taskly"}</span>
               </>
             )}
           </button>

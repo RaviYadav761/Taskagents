@@ -316,34 +316,6 @@ const Homepage = () => {
   };
 
   // Auth Handlers
-  const handleSignUp = (newUser) => {
-    // 1. Initialize completely empty clean workspace for new user as requested
-    const emptyTasks = [];
-    setTasks(emptyTasks);
-    setSelectedTaskId("");
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(emptyTasks));
-    localStorage.setItem("taskly_notes_v2", JSON.stringify([]));
-
-    // 2. Set profile info
-    const newProfile = {
-      fullName: newUser.fullName,
-      email: newUser.email,
-      role: "Personal Workspace",
-      avatar: "/assets/avatar.jpg",
-      theme: "normal",
-      accentColor: "emerald",
-      showFloatingBot: false,
-    };
-    localStorage.setItem("taskly_profile_v1", JSON.stringify(newProfile));
-    window.dispatchEvent(new CustomEvent("taskly_settings_updated", { detail: newProfile }));
-
-    // 3. Set auth session
-    setCurrentUser(newUser);
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(newUser));
-    setIsAuthModalOpen(false);
-    setActiveTab("home");
-  };
-
   const handleLogin = (user) => {
     setCurrentUser(user);
     localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
@@ -824,7 +796,6 @@ const Homepage = () => {
       <AuthModal
         isOpen={isAuthModalOpen}
         onLogin={handleLogin}
-        onSignUp={handleSignUp}
         onContinueDemo={handleContinueDemo}
       />
     </div>

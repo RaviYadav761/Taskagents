@@ -23,6 +23,12 @@ try {
   const corsResponse = await fetch(base + '/health', { headers: { Origin: 'http://allowed.test' } });
   assert.equal(corsResponse.headers.get('access-control-allow-origin'), 'http://allowed.test');
 
+  const weakPasswordResponse = await fetch(base + '/auth/register', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'weak@example.test', password: 'short', fullName: 'Weak Password' }),
+  });
+  assert.equal(weakPasswordResponse.status, 400, 'weak signup passwords must be rejected');
+
   const register = await fetch(base + '/auth/register', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: 'integration@example.test', password: 'ValidPass123!', fullName: 'Integration' }),

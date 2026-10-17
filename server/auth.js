@@ -2,7 +2,10 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'taskly-automation-super-secret-key-2026';
+const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? '' : crypto.randomBytes(32).toString('hex'));
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET must be configured with a strong, private value in production.');
+}
 
 export function hashPassword(plain) {
   return bcrypt.hashSync(plain, 10);
@@ -27,7 +30,7 @@ export function generateToken(user) {
 export function verifyToken(token) {
   try {
     return jwt.verify(token, JWT_SECRET);
-  } catch (err) {
+  } catch {
     return null;
   }
 }
