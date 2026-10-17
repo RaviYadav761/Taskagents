@@ -47,27 +47,19 @@ const Homepage = () => {
   // Load tasks from LocalStorage or user workspace
   const [tasks, setTasks] = useState(() => {
     try {
-      const savedUser = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (savedUser) {
-        const parsedUser = JSON.parse(savedUser);
-        if (parsedUser?.email) {
-          const userTasks = localStorage.getItem(`taskly_tasks_${parsedUser.email.toLowerCase()}`);
-          if (userTasks) {
-            return JSON.parse(userTasks);
-          }
-        }
-      }
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed;
+      if (localStorage.getItem(DEMO_SESSION_KEY) === "true") {
+        const savedUser = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null");
+        if (savedUser?.id === "demo-alex") {
+          const userTasks = localStorage.getItem(`taskly_tasks_${savedUser.email.toLowerCase()}`);
+          if (userTasks) return JSON.parse(userTasks);
+          const demoTasks = localStorage.getItem(LOCAL_STORAGE_KEY);
+          if (demoTasks) return JSON.parse(demoTasks);
         }
       }
     } catch (e) {
       console.error("Failed to load tasks:", e);
     }
-    return INITIAL_TASKS;
+    return [];
   });
 
   // Sync to LocalStorage and user-specific key
